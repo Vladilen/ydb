@@ -52,6 +52,24 @@ Y_UNIT_TEST_SUITE(SortableBatchPosition) {
             UNIT_ASSERT(!!findPosition);
             UNIT_ASSERT_VALUES_EQUAL(findPosition->GetPosition(), 4);
         }
+
+        NMerger::TSortableBatchPosition searchPositionReverse(search, 0, true);
+        Cerr << "!!! Search " << searchPositionReverse.DebugJson() << Endl;
+        Cerr << "!!! Data " << data->ToString() << Endl;
+        Cerr << " \n \n";
+
+        {
+            // FindBound(position, posStart, posFinish, forFound, greater)
+            auto findPosition = NMerger::TSortableBatchPosition::FindBound(data, searchPositionReverse, false, std::nullopt);
+            UNIT_ASSERT(!!findPosition);
+            UNIT_ASSERT_VALUES_EQUAL(findPosition->GetPosition(), 3);
+        }
+        {
+            // FindBound(position, posStart, posFinish, forFound, greater)
+            auto findPosition = NMerger::TSortableBatchPosition::FindBound(data, searchPositionReverse, true, std::nullopt);
+            UNIT_ASSERT(!!findPosition);
+            UNIT_ASSERT_VALUES_EQUAL(findPosition->GetPosition(), 1);
+        }
     }
 }
 

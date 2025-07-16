@@ -595,7 +595,143 @@ bool CheckSorted(const std::shared_ptr<arrow::RecordBatch>& batch, bool desc = f
     return true;
 }
 
-}
+struct TDataRow2 {
+    static const TTypeInfo* MakeTypeInfos() {
+        static const TTypeInfo types[3] = {
+            TTypeInfo(NTypeIds::Int32),
+            TTypeInfo(NTypeIds::Int32),
+            TTypeInfo(NTypeIds::Int32)};
+        return types;
+    }
+
+    i32 id1;
+    i32 value;
+    i32 version;
+
+    bool operator==(const TDataRow2& r) const {
+        return (id1 == r.id1) && (value == r.value) && (version == r.version);
+    }
+
+    static std::shared_ptr<arrow::Schema> MakeFullSchema() {
+        std::vector<std::shared_ptr<arrow::Field>> fields = {
+            arrow::field("id1", arrow::int32(), false),
+            arrow::field("value", arrow::int32(), false),
+            arrow::field("version", arrow::int32(), false)};
+
+        return std::make_shared<arrow::Schema>(std::move(fields));
+    }
+
+    static std::shared_ptr<arrow::Schema> MakeDataSchema() {
+        std::vector<std::shared_ptr<arrow::Field>> fields = {
+            arrow::field("id1", arrow::int32(), false),
+            arrow::field("value", arrow::int32(), false)};
+
+        return std::make_shared<arrow::Schema>(std::move(fields));
+    }
+
+    static std::shared_ptr<arrow::Schema> MakeSortingSchema() {
+        std::vector<std::shared_ptr<arrow::Field>> fields = {
+            arrow::field("id1", arrow::int32(), false)};
+
+        return std::make_shared<arrow::Schema>(std::move(fields));
+    }
+
+    static std::shared_ptr<arrow::Schema> MakeVersionSchema() {
+        std::vector<std::shared_ptr<arrow::Field>> fields = {
+            arrow::field("version", arrow::int32(), false)};
+
+        return std::make_shared<arrow::Schema>(std::move(fields));
+    }
+
+    static std::vector<std::pair<TString, TTypeInfo>> MakeYdbSchema() {
+        std::vector<std::pair<TString, TTypeInfo>> columns = {
+            {"id1", TTypeInfo(NTypeIds::Int32)},
+            {"value", TTypeInfo(NTypeIds::Int32)},
+            {"version", TTypeInfo(NTypeIds::Int32)},
+        };
+        return columns;
+    }
+
+    NKikimr::TDbTupleRef ToDbTupleRef() const {
+        static TCell Cells[3];
+        Cells[0] = TCell::Make<i32>(id1);
+        Cells[1] = TCell::Make<i32>(value);
+        Cells[2] = TCell::Make<i32>(version);
+
+        return NKikimr::TDbTupleRef(MakeTypeInfos(), Cells, 3);
+    }
+
+    TOwnedCellVec SerializedCells() const {
+        NKikimr::TDbTupleRef value = ToDbTupleRef();
+        std::vector<TCell> cells(value.Cells().data(), value.Cells().data() + value.Cells().size());
+
+        return TOwnedCellVec(cells);
+    }
+
+    static std::vector<std::string> GetColumns() {
+        return {"id1", "value", "version"};
+    }
+    static std::vector<std::string> GetVColumns() {
+        return {"version"};
+    }
+    static std::vector<std::string> GetSColumns() {
+        return {"id1"};
+    }
+};
+
+class TDataRowTableBuilder2 {
+public:
+    void AddRow(const TDataRow2& row) {
+        UNIT_ASSERT(Bid1.Append(row.id1).ok());
+        UNIT_ASSERT(Bvalue.Append(row.value).ok());
+        UNIT_ASSERT(Bversion.Append(row.value).ok());
+    }
+
+    std::shared_ptr<arrow::Table> Finish() {
+        std::shared_ptr<arrow::Int32Array> arid1;
+        std::shared_ptr<arrow::Int32Array> arvalue;
+        std::shared_ptr<arrow::Int32Array> arversion;
+
+        UNIT_ASSERT(Bid1.Finish(&arid1).ok());
+        UNIT_ASSERT(Bvalue.Finish(&arvalue).ok());
+        UNIT_ASSERT(Bversion.Finish(&arversion).ok());
+
+        std::shared_ptr<arrow::Schema> schema = TDataRow2::MakeFullSchema();
+        return arrow::Table::Make(schema, {arid1, arvalue, arversion});
+    }
+
+    static std::shared_ptr<arrow::Table> Build(const std::vector<struct TDataRow2>& rows) {
+        TDataRowTableBuilder2 builder;
+        for (const TDataRow2& row : rows) {
+            builder.AddRow(row);
+        }
+        return builder.Finish();
+    }
+
+    static std::shared_ptr<arrow::RecordBatch> buildBatch(const std::vector<std::pair<int, int>>& rows, int version) {
+        TDataRowTableBuilder2 builder;
+        for (auto [i, j] : rows) {
+            builder.AddRow(TDataRow2{i, j, version});
+        }
+
+        auto table = builder.Finish();
+        auto schema = table->schema();
+        auto tres = table->SelectColumns(std::vector<int>{
+            schema->GetFieldIndex("id1"),
+            schema->GetFieldIndex("value"),
+            schema->GetFieldIndex("version")});
+        UNIT_ASSERT(tres.ok());
+
+        return ExtractBatch(*tres);
+    };
+
+private:
+    arrow::Int32Builder Bid1;
+    arrow::Int32Builder Bvalue;
+    arrow::Int32Builder Bversion;
+};
+
+} // namespace
 
 Y_UNIT_TEST_SUITE(ArrowTest) {
     Y_UNIT_TEST(BatchBuilder) {
@@ -605,8 +741,8 @@ Y_UNIT_TEST_SUITE(ArrowTest) {
         UNIT_ASSERT(batch);
 
         auto expectedSchema = TDataRow::MakeArrowSchema();
-        //Cerr << expectedSchema->ToString() << '\n';
-        //Cerr << batch->schema()->ToString() << '\n';
+        // Cerr << expectedSchema->ToString() << '\n';
+        // Cerr << batch->schema()->ToString() << '\n';
 
         UNIT_ASSERT_EQUAL(expectedSchema->Equals(*batch->schema()), true);
 
@@ -633,10 +769,10 @@ Y_UNIT_TEST_SUITE(ArrowTest) {
 
         UNIT_ASSERT_EQUAL(expectedSchema->Equals(*batch->schema()), true);
 
-        struct TRowWriter : public NArrow::IRowWriter {
+        struct TRowWriter: public NArrow::IRowWriter {
             std::vector<TOwnedCellVec> Rows;
 
-            void AddRow(const TConstArrayRef<TCell> &cells) override {
+            void AddRow(const TConstArrayRef<TCell>& cells) override {
                 Rows.push_back(TOwnedCellVec(cells));
             }
         } rowWriter;
@@ -650,10 +786,7 @@ Y_UNIT_TEST_SUITE(ArrowTest) {
         UNIT_ASSERT_VALUES_EQUAL(cellRows.size(), rowWriter.Rows.size());
 
         for (size_t i = 0; i < rows.size(); ++i) {
-            UNIT_ASSERT(0 == CompareTypedCellVectors(
-                            cellRows[i].data(), rowWriter.Rows[i].data(),
-                            TDataRow::MakeTypeInfos(),
-                            cellRows[i].size(), rowWriter.Rows[i].size()));
+            UNIT_ASSERT(0 == CompareTypedCellVectors(cellRows[i].data(), rowWriter.Rows[i].data(), TDataRow::MakeTypeInfos(), cellRows[i].size(), rowWriter.Rows[i].size()));
         }
     }
 
@@ -681,11 +814,11 @@ Y_UNIT_TEST_SUITE(ArrowTest) {
         UNIT_ASSERT(CheckSorted1000(batch));
 
         std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
-        batches.push_back(batch->Slice(0, 100));    // 0..100 +100
-        batches.push_back(batch->Slice(100, 200));  // 100..300 +200
-        batches.push_back(batch->Slice(200, 400));  // 200..600 +300
-        batches.push_back(batch->Slice(500, 50));   // 500..550 +50
-        batches.push_back(batch->Slice(600, 1));    // 600..601 +1
+        batches.push_back(batch->Slice(0, 100));   // 0..100 +100
+        batches.push_back(batch->Slice(100, 200)); // 100..300 +200
+        batches.push_back(batch->Slice(200, 400)); // 200..600 +300
+        batches.push_back(batch->Slice(500, 50));  // 500..550 +50
+        batches.push_back(batch->Slice(600, 1));   // 600..601 +1
 
         std::shared_ptr<arrow::RecordBatch> sorted;
         {
@@ -705,132 +838,6 @@ Y_UNIT_TEST_SUITE(ArrowTest) {
     }
 
     Y_UNIT_TEST(MergingSortedInputStream2) {
-        struct TDataRow2 {
-            static const TTypeInfo* MakeTypeInfos() {
-                static const TTypeInfo types[3] = {
-                    TTypeInfo(NTypeIds::Int32),
-                    TTypeInfo(NTypeIds::Int32),
-                    TTypeInfo(NTypeIds::Int32)};
-                return types;
-            }
-
-            i32 id1;
-            i32 value;
-            i32 version;
-
-            bool operator==(const TDataRow2& r) const {
-                return (id1 == r.id1) && (value == r.value) && (version == r.version);
-            }
-
-            static std::shared_ptr<arrow::Schema> MakeFullSchema() {
-                std::vector<std::shared_ptr<arrow::Field>> fields = {
-                    arrow::field("id1", arrow::int32(), false),
-                    arrow::field("value", arrow::int32(), false),
-                    arrow::field("version", arrow::int32(), false)};
-
-                return std::make_shared<arrow::Schema>(std::move(fields));
-            }
-
-            static std::shared_ptr<arrow::Schema> MakeDataSchema() {
-                std::vector<std::shared_ptr<arrow::Field>> fields = {
-                    arrow::field("id1", arrow::int32(), false),
-                    arrow::field("value", arrow::int32(), false)};
-
-                return std::make_shared<arrow::Schema>(std::move(fields));
-            }
-
-            static std::shared_ptr<arrow::Schema> MakeSortingSchema() {
-                std::vector<std::shared_ptr<arrow::Field>> fields = {
-                    arrow::field("id1", arrow::int32(), false)};
-
-                return std::make_shared<arrow::Schema>(std::move(fields));
-            }
-
-            static std::shared_ptr<arrow::Schema> MakeVersionSchema() {
-                std::vector<std::shared_ptr<arrow::Field>> fields = {
-                    arrow::field("version", arrow::int32(), false)};
-
-                return std::make_shared<arrow::Schema>(std::move(fields));
-            }
-
-            static std::vector<std::pair<TString, TTypeInfo>> MakeYdbSchema() {
-                std::vector<std::pair<TString, TTypeInfo>> columns = {
-                    {"id1", TTypeInfo(NTypeIds::Int32)},
-                    {"value", TTypeInfo(NTypeIds::Int32)},
-                    {"version", TTypeInfo(NTypeIds::Int32)},
-                };
-                return columns;
-            }
-
-            NKikimr::TDbTupleRef ToDbTupleRef() const {
-                static TCell Cells[3];
-                Cells[0] = TCell::Make<i32>(id1);
-                Cells[1] = TCell::Make<i32>(value);
-                Cells[2] = TCell::Make<i32>(version);
-
-                return NKikimr::TDbTupleRef(MakeTypeInfos(), Cells, 3);
-            }
-
-            TOwnedCellVec SerializedCells() const {
-                NKikimr::TDbTupleRef value = ToDbTupleRef();
-                std::vector<TCell> cells(value.Cells().data(), value.Cells().data() + value.Cells().size());
-
-                return TOwnedCellVec(cells);
-            }
-        };
-
-        class TDataRowTableBuilder2 {
-        public:
-            void AddRow(const TDataRow2& row) {
-                UNIT_ASSERT(Bid1.Append(row.id1).ok());
-                UNIT_ASSERT(Bvalue.Append(row.value).ok());
-                UNIT_ASSERT(Bversion.Append(row.value).ok());
-            }
-
-            std::shared_ptr<arrow::Table> Finish() {
-                std::shared_ptr<arrow::Int32Array> arid1;
-                std::shared_ptr<arrow::Int32Array> arvalue;
-                std::shared_ptr<arrow::Int32Array> arversion;
-
-                UNIT_ASSERT(Bid1.Finish(&arid1).ok());
-                UNIT_ASSERT(Bvalue.Finish(&arvalue).ok());
-                UNIT_ASSERT(Bversion.Finish(&arversion).ok());
-
-                std::shared_ptr<arrow::Schema> schema = TDataRow2::MakeFullSchema();
-                return arrow::Table::Make(schema, {arid1, arvalue, arversion});
-            }
-
-            static std::shared_ptr<arrow::Table> Build(const std::vector<struct TDataRow2>& rows) {
-                TDataRowTableBuilder2 builder;
-                for (const TDataRow2& row : rows) {
-                    builder.AddRow(row);
-                }
-                return builder.Finish();
-            }
-
-        private:
-            arrow::Int32Builder Bid1;
-            arrow::Int32Builder Bvalue;
-            arrow::Int32Builder Bversion;
-        };
-
-        auto buildBatch = [&](const std::vector<std::pair<int, int>>& rows, int version) {
-            TDataRowTableBuilder2 builder;
-            for (auto [i, j] : rows) {
-                builder.AddRow(TDataRow2{i, j, version});
-            }
-
-            auto table = builder.Finish();
-            auto schema = table->schema();
-            auto tres = table->SelectColumns(std::vector<int>{
-                schema->GetFieldIndex("id1"),
-                schema->GetFieldIndex("value"),
-                schema->GetFieldIndex("version")});
-            UNIT_ASSERT(tres.ok());
-
-            return ExtractBatch(*tres);
-        };
-
         const bool isReverse = true;
         const bool deepCopy = false;
         const bool includeFinish = true;
@@ -843,16 +850,16 @@ Y_UNIT_TEST_SUITE(ArrowTest) {
         const int oldVersion = 0;
         const int newVersion = 1;
 
-        std::shared_ptr<arrow::RecordBatch> batch1 = buildBatch({{p1, oldValue}}, oldVersion);
-        std::shared_ptr<arrow::RecordBatch> batch2 = buildBatch({{p2, oldValue}}, oldVersion);
-        std::shared_ptr<arrow::RecordBatch> batch3 = buildBatch({{p1, newValue}, {p2, newValue}}, newVersion);
+        std::shared_ptr<arrow::RecordBatch> batch1 = TDataRowTableBuilder2::buildBatch({{p1, oldValue}}, oldVersion);
+        std::shared_ptr<arrow::RecordBatch> batch2 = TDataRowTableBuilder2::buildBatch({{p2, oldValue}}, oldVersion);
+        std::shared_ptr<arrow::RecordBatch> batch3 = TDataRowTableBuilder2::buildBatch({{p1, newValue}, {p2, newValue}}, newVersion);
 
         Cerr << batch1->ToString() << Endl;
         Cerr << batch2->ToString() << Endl;
         Cerr << batch3->ToString() << Endl;
 
-        const std::vector<std::string> vColumns = {"version"};
-        const std::vector<std::string> sColumns = {"id1"};
+        auto vColumns = TDataRow2::GetVColumns();
+        auto sColumns = TDataRow2::GetSColumns();
 
         auto merger =
             std::make_shared<NArrow::NMerger::TMergePartialStream>(TDataRow2::MakeSortingSchema(),
@@ -1047,6 +1054,5 @@ Y_UNIT_TEST_SUITE(ArrowTest) {
             UNIT_ASSERT_VALUES_EQUAL(counts[1], 3);
         }
     }
-}
-
+    } // Y_UNIT_TEST_SUITE(ArrowTest)
 }
