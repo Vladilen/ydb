@@ -684,7 +684,7 @@ public:
     void AddRow(const TDataRow2& row) {
         UNIT_ASSERT(Bid1.Append(row.id1).ok());
         UNIT_ASSERT(Bvalue.Append(row.value).ok());
-        UNIT_ASSERT(Bversion.Append(row.value).ok());
+        UNIT_ASSERT(Bversion.Append(row.version).ok());
     }
 
     std::shared_ptr<arrow::Table> Finish() {
@@ -902,6 +902,82 @@ Y_UNIT_TEST_SUITE(ArrowTest) {
 
         UNIT_ASSERT_EQUAL(p1, id1Val);
         UNIT_ASSERT_EQUAL(newValue, valueVal);
+    }
+
+    Y_UNIT_TEST(MergingSortedInputStream3) {
+        const bool isReverse = true;
+        const bool deepCopy = false;
+        const bool includeFinish = true;
+        const bool includeStart = true;
+
+        const int p1 = 269299117;
+        const int p2 = 2125791724;
+        const int p3 = 383764224;
+        const int p4 = 1929453799;
+        const int oldValue = 7777;
+        const int newValue = 8888;
+        const int v0 = 0;
+        const int v1 = 1;
+        const int v2 = 2;
+
+        std::shared_ptr<arrow::RecordBatch> batch1 = TDataRowTableBuilder2::buildBatch({{p1, oldValue}, {p2, oldValue}}, v0);
+        std::shared_ptr<arrow::RecordBatch> batch2 = TDataRowTableBuilder2::buildBatch({{p3, oldValue}, {p4, oldValue}}, v1);
+        std::shared_ptr<arrow::RecordBatch> batch3 = TDataRowTableBuilder2::buildBatch({{p1, newValue}, {p3, newValue}, {p4, newValue}, {p2, newValue}}, v2);
+
+        Cerr << batch1->ToString() << Endl;
+        Cerr << batch2->ToString() << Endl;
+        Cerr << batch3->ToString() << Endl;
+
+        auto vColumns = TDataRow2::GetVColumns();
+        auto sColumns = TDataRow2::GetSColumns();
+
+        auto merger =
+            std::make_shared<NArrow::NMerger::TMergePartialStream>(TDataRow2::MakeSortingSchema(),
+                TDataRow2::MakeDataSchema(), isReverse, vColumns, std::nullopt);
+
+        merger->AddSource(batch1, nullptr, NArrow::NMerger::TIterationOrder(isReverse, 0));
+        merger->AddSource(batch2, nullptr, NArrow::NMerger::TIterationOrder(isReverse, 0));
+        merger->AddSource(batch3, nullptr, NArrow::NMerger::TIterationOrder(isReverse, 0));
+        // Range to include in result batch
+        std::shared_ptr<arrow::RecordBatch> searchBatch = TDataRowTableBuilder2::buildBatch({{p4, oldValue}}, v0);
+        NArrow::NMerger::TSortableBatchPosition startingPoint(searchBatch, 0, sColumns, {}, isReverse);
+        // NArrow::NMerger::TSortableBatchPosition finishPoint(batch2, 0, sColumns, {}, isReverse);
+        std::shared_ptr<arrow::RecordBatch> cp = TDataRowTableBuilder2::buildBatch({{p3, oldValue}}, v0);
+        NArrow::NMerger::TSortableBatchPosition finishPoint(cp, 0, sColumns, {}, isReverse);
+
+        merger->PutControlPoint(finishPoint, deepCopy);
+        merger->SkipToBound(startingPoint, includeStart);
+
+        NArrow::NMerger::TRecordBatchBuilder builder(TDataRow2::MakeDataSchema()->fields());
+        std::optional<NArrow::NMerger::TCursor> lastResultPosition;
+
+        merger->DrainToControlPoint(builder, includeFinish, &lastResultPosition);
+
+        if (lastResultPosition) {
+            Cerr << "lastResultPosition: " << lastResultPosition->DebugJson() << Endl;
+        }
+
+        auto resultBatch = NArrow::TStatusValidator::GetValid(arrow::Table::FromRecordBatches({builder.Finalize()}));
+        UNIT_ASSERT(resultBatch);
+        Cerr << "resultBatch: " << resultBatch->ToString() << Endl;
+
+        UNIT_ASSERT_EQUAL(2, resultBatch->num_rows());
+
+        auto id1Col = resultBatch->GetColumnByName("id1");
+        auto valueCol = resultBatch->GetColumnByName("value");
+
+        UNIT_ASSERT_EQUAL(1, id1Col->num_chunks());
+        UNIT_ASSERT_EQUAL(1, valueCol->num_chunks());
+
+        auto p4Id1 = std::static_pointer_cast<arrow::Int32Array>(id1Col->chunk(0))->Value(0);
+        auto p3Id1 = std::static_pointer_cast<arrow::Int32Array>(id1Col->chunk(0))->Value(1);
+        auto p4Val = std::static_pointer_cast<arrow::Int32Array>(valueCol->chunk(0))->Value(0);
+        auto p3Val = std::static_pointer_cast<arrow::Int32Array>(valueCol->chunk(0))->Value(1);
+
+        UNIT_ASSERT_EQUAL(p3, p3Id1);
+        UNIT_ASSERT_EQUAL(p4, p4Id1);
+        UNIT_ASSERT_EQUAL(newValue, p3Val);
+        UNIT_ASSERT_EQUAL(newValue, p4Val);
     }
 
     Y_UNIT_TEST(MergingSortedInputStreamReversed) {
