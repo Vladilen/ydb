@@ -138,7 +138,7 @@ void TMergePartialStream::SkipToBound(const TSortableBatchPosition& pos, const b
     if (SortHeap.Empty()) {
         return;
     }
-    AFL_DEBUG(NKikimrServices::ARROW_HELPER)("pos", pos.DebugJson().GetStringRobust())("heap", SortHeap.Current().GetKeyColumns().DebugJson().GetStringRobust());
+    // AFL_DEBUG(NKikimrServices::ARROW_HELPER)("pos", pos.DebugJson().GetStringRobust())("heap", SortHeap.Current().GetKeyColumns().DebugJson().GetStringRobust());
     while (!SortHeap.Empty()) {
         const auto cmpResult = SortHeap.Current().GetKeyColumns().Compare(pos);
         if (cmpResult == std::partial_ordering::greater) {
@@ -148,7 +148,7 @@ void TMergePartialStream::SkipToBound(const TSortableBatchPosition& pos, const b
             break;
         }
         const TSortableBatchPosition::TFoundPosition skipPos = SortHeap.MutableCurrent().SkipToLower(pos);
-        AFL_DEBUG(NKikimrServices::ARROW_HELPER)("pos", pos.DebugJson().GetStringRobust())("heap", SortHeap.Current().GetKeyColumns().DebugJson().GetStringRobust());
+        // AFL_DEBUG(NKikimrServices::ARROW_HELPER)("pos", pos.DebugJson().GetStringRobust())("heap", SortHeap.Current().GetKeyColumns().DebugJson().GetStringRobust());
         if (skipPos.IsEqual()) {
             if (!lower && !SortHeap.MutableCurrent().Next()) {
                 SortHeap.RemoveTop();

@@ -92,6 +92,9 @@ bool TBaseMergeTask::DoOnAllocated(
 }
 
 TConclusionStatus TStartMergeTask::DoExecuteImpl() {
+    static std::atomic_int currentImpl = 0;
+    int current = currentImpl.fetch_add(1);
+
     if (OnlyEmptySources) {
         ResultBatch = nullptr;
         return TConclusionStatus::Success();
@@ -134,6 +137,7 @@ TConclusionStatus TStartMergeTask::DoExecuteImpl() {
                 if (!i->GetStageResult().IsEmpty()) {
                     isEmpty = false;
                 }
+                AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD_SCAN)("step", "adding source")("current", current)("source", rb->DebugJson(true));
                 Merger->AddSource(rb, i->GetStageResult().GetNotAppliedFilter(),
                     NArrow::NMerger::TIterationOrder(Context->GetCommonContext()->IsReverse(), 0));
             }
@@ -144,7 +148,9 @@ TConclusionStatus TStartMergeTask::DoExecuteImpl() {
             return TConclusionStatus::Success();
         }
     }
+    AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD_SCAN)("step", "adding control point")("current", current)("point", MergingContext->GetFinish().DebugJson());
     Merger->PutControlPoint(MergingContext->GetFinish(), false);
+    AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD_SCAN)("step", "skip to bound")("current", current)("point", MergingContext->GetStart().DebugJson())("include_start", MergingContext->GetIncludeStart());
     Merger->SkipToBound(MergingContext->GetStart(), MergingContext->GetIncludeStart());
     const ui32 originalSourcesCount = Sources.size();
     Sources.clear();
@@ -172,7 +178,9 @@ TConclusionStatus TStartMergeTask::DoExecuteImpl() {
         LastPK = lastResultPosition->ExtractSortingPosition(MergingContext->GetFinish().GetSortFields());
     }
     AFL_VERIFY(!!LastPK == (!!ResultBatch && ResultBatch->num_rows()));
-    return PrepareResultBatch();
+    auto res = PrepareResultBatch();
+    AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD_SCAN)("step", "return result")("current", current)("ResultBatch", ResultBatch ? ResultBatch->ToString() : "null");
+    return res;
 }
 
 TStartMergeTask::TStartMergeTask(const std::shared_ptr<TMergingContext>& mergingContext, const std::shared_ptr<TSpecialReadContext>& readContext,

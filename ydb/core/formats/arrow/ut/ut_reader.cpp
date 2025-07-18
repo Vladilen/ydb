@@ -1,3 +1,4 @@
+#include <util/stream/file.h>
 #include <ydb/core/formats/arrow/arrow_batch_builder.h>
 #include <ydb/core/formats/arrow/arrow_helpers.h>
 #include <ydb/core/formats/arrow/reader/merger.h>
@@ -5,6 +6,7 @@
 #include <ydb/core/formats/arrow/reader/result_builder.h>
 
 #include <library/cpp/testing/unittest/registar.h>
+#include <library/cpp/json/json_reader.h>
 
 namespace NKikimr::NArrow {
 namespace {
@@ -350,6 +352,251 @@ Y_UNIT_TEST_SUITE(SortableBatchPosition) {
         UNIT_ASSERT_EQUAL((isReverse ? p2 : p3), secondId1);
         UNIT_ASSERT_EQUAL(newValue, firstVal);
         UNIT_ASSERT_EQUAL(newValue, secondVal);
+    }
+
+    Y_UNIT_TEST(TestMergeFile) {
+        struct TDataRowMerge {
+            static const TTypeInfo* MakeTypeInfos() {
+                static const TTypeInfo types[5] = {
+                    TTypeInfo(NTypeIds::Uint64),
+                    TTypeInfo(NTypeIds::Uint64),
+                    TTypeInfo(NTypeIds::Uint64),
+                    TTypeInfo(NTypeIds::Uint64),
+                    TTypeInfo(NTypeIds::Uint64)};
+                return types;
+            }
+
+            ui64 _yql_plan_step;
+            ui64 _yql_tx_id;
+            ui64 EventTime;
+            ui64 ID;
+            ui64 UserID;
+
+            bool operator==(const TDataRowMerge& r) const = default;
+
+            static std::shared_ptr<arrow::Schema> MakeFullSchema() {
+                std::vector<std::shared_ptr<arrow::Field>> fields = {
+                    arrow::field("_yql_plan_step", arrow::uint64(), false),
+                    arrow::field("_yql_tx_id", arrow::uint64(), false),
+                    arrow::field("EventTime", arrow::uint64(), false),
+                    arrow::field("ID", arrow::uint64(), false),
+                    arrow::field("UserID", arrow::uint64(), false)};
+
+                return std::make_shared<arrow::Schema>(std::move(fields));
+            }
+
+            static std::shared_ptr<arrow::Schema> MakeDataSchema() {
+                std::vector<std::shared_ptr<arrow::Field>> fields = {
+                    arrow::field("EventTime", arrow::uint64(), false),
+                    arrow::field("ID", arrow::uint64(), false),
+                    arrow::field("UserID", arrow::uint64(), false)};
+
+                return std::make_shared<arrow::Schema>(std::move(fields));
+            }
+
+            static std::shared_ptr<arrow::Schema> MakeSortingSchema() {
+                std::vector<std::shared_ptr<arrow::Field>> fields = {
+                    arrow::field("EventTime", arrow::uint64(), false),
+                    arrow::field("ID", arrow::uint64(), false)};
+
+                return std::make_shared<arrow::Schema>(std::move(fields));
+            }
+
+            static std::shared_ptr<arrow::Schema> MakeVersionSchema() {
+                std::vector<std::shared_ptr<arrow::Field>> fields = {
+                    arrow::field("_yql_plan_step", arrow::uint64(), false),
+                    arrow::field("_yql_tx_id", arrow::uint64(), false)};
+
+                return std::make_shared<arrow::Schema>(std::move(fields));
+            }
+
+            static std::vector<std::pair<TString, TTypeInfo>> MakeYdbSchema() {
+                std::vector<std::pair<TString, TTypeInfo>> columns = {
+                    {"_yql_plan_step", TTypeInfo(NTypeIds::Uint64)},
+                    {"_yql_tx_id", TTypeInfo(NTypeIds::Uint64)},
+                    {"EventTime", TTypeInfo(NTypeIds::Uint64)},
+                    {"ID", TTypeInfo(NTypeIds::Uint64)},
+                    {"UserID", TTypeInfo(NTypeIds::Uint64)},
+                };
+                return columns;
+            }
+
+            static std::vector<std::string> GetVersionColumns() {
+                return {"_yql_plan_step", "_yql_tx_id"};
+            }
+
+            static std::vector<std::string> GetSortingColumns() {
+                return {"EventTime", "ID"};
+            }
+
+            static std::vector<std::string> GetAllColumns() {
+                return {"_yql_plan_step", "_yql_tx_id", "EventTime", "ID", "UserID"};
+            }
+        };
+
+        class TDataRowMergeTableBuilder {
+        public:
+            void AddRow(const TDataRowMerge& row) {
+                UNIT_ASSERT(B_yql_plan_step.Append(row._yql_plan_step).ok());
+                UNIT_ASSERT(B_yql_tx_id.Append(row._yql_tx_id).ok());
+                UNIT_ASSERT(BEventTime.Append(row.EventTime).ok());
+                UNIT_ASSERT(BID.Append(row.ID).ok());
+                UNIT_ASSERT(BUserID.Append(row.UserID).ok());
+            }
+
+            std::shared_ptr<arrow::Table> Finish() {
+                std::shared_ptr<arrow::UInt64Array> ar_yql_plan_step;
+                std::shared_ptr<arrow::UInt64Array> ar_yql_tx_id;
+                std::shared_ptr<arrow::UInt64Array> arEventTime;
+                std::shared_ptr<arrow::UInt64Array> arID;
+                std::shared_ptr<arrow::UInt64Array> arUserID;
+
+                UNIT_ASSERT(B_yql_plan_step.Finish(&ar_yql_plan_step).ok());
+                UNIT_ASSERT(B_yql_tx_id.Finish(&ar_yql_tx_id).ok());
+                UNIT_ASSERT(BEventTime.Finish(&arEventTime).ok());
+                UNIT_ASSERT(BID.Finish(&arID).ok());
+                UNIT_ASSERT(BUserID.Finish(&arUserID).ok());
+
+                std::shared_ptr<arrow::Schema> schema = TDataRowMerge::MakeFullSchema();
+                return arrow::Table::Make(schema, {ar_yql_plan_step, ar_yql_tx_id, arEventTime, arID, arUserID});
+            }
+
+            static std::shared_ptr<arrow::Table> Build(const std::vector<struct TDataRowMerge>& rows) {
+                TDataRowMergeTableBuilder builder;
+                for (const TDataRowMerge& row : rows) {
+                    builder.AddRow(row);
+                }
+                return builder.Finish();
+            }
+
+            static std::shared_ptr<arrow::RecordBatch> buildBatch(const std::vector<std::vector<ui64>>& rows) {
+                TDataRowMergeTableBuilder builder;
+                for (auto row : rows) {
+                    ui64 _yql_plan_step = row[0];
+                    ui64 _yql_tx_id = row[1];
+                    ui64 EventTime = row[2];
+                    ui64 ID = row[3];
+                    ui64 UserID = row[4];
+                    builder.AddRow(TDataRowMerge{_yql_plan_step, _yql_tx_id, EventTime, ID, UserID});
+                }
+
+                auto table = builder.Finish();
+                auto schema = table->schema();
+                auto tres = table->SelectColumns(std::vector<int>{
+                    schema->GetFieldIndex("_yql_plan_step"),
+                    schema->GetFieldIndex("_yql_tx_id"),
+                    schema->GetFieldIndex("EventTime"),
+                    schema->GetFieldIndex("ID"),
+                    schema->GetFieldIndex("UserID")});
+                UNIT_ASSERT(tres.ok());
+
+                return ExtractBatch(*tres);
+            };
+
+        private:
+            arrow::UInt64Builder B_yql_plan_step;
+            arrow::UInt64Builder B_yql_tx_id;
+            arrow::UInt64Builder BEventTime;
+            arrow::UInt64Builder BID;
+            arrow::UInt64Builder BUserID;
+        };
+
+        const bool isReverse = false;
+        const bool deepCopy = false;
+        const bool includeFinish = true;
+        const bool includeStart = true;
+
+        auto vColumns = TDataRowMerge::GetVersionColumns();
+        auto sColumns = TDataRowMerge::GetSortingColumns();
+        auto aColumns = TDataRowMerge::GetAllColumns();
+
+        TFileInput fs("/tmp/495.json");
+        NJson::TJsonValue bigData = NJson::ReadJsonFastTree(fs.ReadAll(), true);
+
+        // Cerr << "bigData: " << bigData << Endl << Endl;
+
+        auto merger =
+            std::make_shared<NArrow::NMerger::TMergePartialStream>(TDataRowMerge::MakeSortingSchema(),
+                TDataRowMerge::MakeDataSchema(), isReverse, vColumns, std::nullopt);
+
+        for (const auto& v : bigData.GetArray()) {
+            std::vector<std::vector<ui64>> rows;
+            const auto& data = v["data"];
+            const auto& schema_ar = v["shema_ar"];
+            for (size_t i = 0; i < schema_ar.GetArray().size(); ++i) {
+                if (auto found = std::find(aColumns.begin(), aColumns.end(), schema_ar.GetArray()[i]["name"].GetString());
+                    found != aColumns.end()) {
+                    const auto& internalData = data.GetArray()[i]["internal"]["data"];
+                    const auto columnI = found - aColumns.begin();
+                    for (size_t j = 0; j < internalData.GetArray().size(); ++j) {
+                        if (rows.size() <= j) {
+                            rows.push_back({0, 0, 0, 0, 0});
+                        }
+
+                        rows[j][columnI] = internalData.GetArray()[j].GetUInteger();
+                    }
+                }
+            }
+
+            // for (auto& row : rows) {
+            // Cerr << row[0] << " " << row[1] << " " << row[2] << " " << row[3] << " " << row[4] << Endl;
+            // }
+            std::shared_ptr<arrow::RecordBatch> batch1 = TDataRowMergeTableBuilder::buildBatch(rows);
+            merger->AddSource(batch1, nullptr, NArrow::NMerger::TIterationOrder(isReverse, 0));
+            Cerr << "batch: " << batch1->ToString() << Endl << Endl;
+        }
+        // Cerr << "???" << Endl;
+
+        // std::shared_ptr<arrow::RecordBatch> batch1 = TDataRowMergeTableBuilder::buildBatch({{1, 2, 3, 4, 0}});
+        // std::shared_ptr<arrow::RecordBatch> batch2 = TDataRowMergeTableBuilder::buildBatch({{5, 6, 7, 8, 0}});
+        // std::shared_ptr<arrow::RecordBatch> batch3 = TDataRowMergeTableBuilder::buildBatch({{17, 18, 3, 4, 13}, {17, 18, 7, 8, 13}});
+
+        // Cerr << "batch1: " << batch1->ToString() << Endl << Endl;
+        // Cerr << "batch2: " << batch2->ToString() << Endl << Endl;
+        // Cerr << "batch3: " << batch3->ToString() << Endl << Endl;
+
+        // merger->AddSource(batch1, nullptr, NArrow::NMerger::TIterationOrder(isReverse, 0));
+        // merger->AddSource(batch2, nullptr, NArrow::NMerger::TIterationOrder(isReverse, 0));
+        // merger->AddSource(batch3, nullptr, NArrow::NMerger::TIterationOrder(isReverse, 0));
+        // Range to include in result batch, only points p2 p3 matters here
+        std::shared_ptr<arrow::RecordBatch> sp = TDataRowMergeTableBuilder::buildBatch({{1, 1, 1749049314, 3071833302402334731, 0}});
+        std::shared_ptr<arrow::RecordBatch> fp = TDataRowMergeTableBuilder::buildBatch({{1, 1, 1749142648, 3096300323017588895, 0}});
+        NArrow::NMerger::TSortableBatchPosition startingPoint(isReverse ? fp : sp, 0, sColumns, {}, isReverse);
+        NArrow::NMerger::TSortableBatchPosition finishPoint(isReverse ? sp : fp, 0, sColumns, {}, isReverse);
+
+        merger->PutControlPoint(finishPoint, deepCopy);
+        merger->SkipToBound(startingPoint, includeStart);
+
+        NArrow::NMerger::TRecordBatchBuilder builder(TDataRowMerge::MakeDataSchema()->fields());
+        std::optional<NArrow::NMerger::TCursor> lastResultPosition;
+
+        merger->DrainToControlPoint(builder, includeFinish, &lastResultPosition);
+
+        UNIT_ASSERT(lastResultPosition);
+        // auto lrpVal = std::static_pointer_cast<arrow::Int32Array>(lastResultPosition->ExtractSortingPosition(TDataRowMerge::MakeSortingSchema()->fields())->column(0))->Value(0);
+        // UNIT_ASSERT_EQUAL(p2, lrpVal);
+
+        auto resultBatch = NArrow::TStatusValidator::GetValid(arrow::Table::FromRecordBatches({builder.Finalize()}));
+        UNIT_ASSERT(resultBatch);
+        Cerr << "resultBatch: " << resultBatch->ToString() << Endl << Endl;
+        Cerr << "rows: " << resultBatch->num_rows() << Endl << Endl;
+        UNIT_ASSERT_EQUAL(10962, resultBatch->num_rows());
+
+        // auto id1Col = resultBatch->GetColumnByName("id1");
+        // auto valueCol = resultBatch->GetColumnByName("value");
+
+        // UNIT_ASSERT_EQUAL(1, id1Col->num_chunks());
+        // UNIT_ASSERT_EQUAL(1, valueCol->num_chunks());
+
+        // auto firstId1 = std::static_pointer_cast<arrow::Int32Array>(id1Col->chunk(0))->Value(0);
+        // auto secondId1 = std::static_pointer_cast<arrow::Int32Array>(id1Col->chunk(0))->Value(1);
+        // auto firstVal = std::static_pointer_cast<arrow::Int32Array>(valueCol->chunk(0))->Value(0);
+        // auto secondVal = std::static_pointer_cast<arrow::Int32Array>(valueCol->chunk(0))->Value(1);
+
+        // UNIT_ASSERT_EQUAL((isReverse ? p3 : p2), firstId1);
+        // UNIT_ASSERT_EQUAL((isReverse ? p2 : p3), secondId1);
+        // UNIT_ASSERT_EQUAL(newValue, firstVal);
+        // UNIT_ASSERT_EQUAL(newValue, secondVal);
     }
 }
 
