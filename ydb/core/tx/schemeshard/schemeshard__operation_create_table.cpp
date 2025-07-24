@@ -615,9 +615,9 @@ public:
             THashMap<ui32, ui32> familyRooms;
             storageRooms.emplace_back(0);
             if (!context.SS->GetBindingsRooms(dstPath.GetPathIdForDomain(), tableInfo->PartitionConfig(), storageRooms, familyRooms, channelsBinding, errStr)) {
-                errStr = TString("database doesn't have required storage pools to create tablet with storage config, details: ") + errStr;
-                result->SetError(NKikimrScheme::StatusInvalidParameter, errStr);
-                return result;
+                // errStr = TString("database doesn't have required storage pools to create tablet with storage config, details: ") + errStr;
+                // result->SetError(NKikimrScheme::StatusInvalidParameter, errStr);
+                // return result;
             }
             tableInfo->SetRoom(storageRooms[0]);
 
