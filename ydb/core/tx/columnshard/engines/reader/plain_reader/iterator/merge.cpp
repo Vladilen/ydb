@@ -187,6 +187,9 @@ TConclusion<bool> TStartMergeTask::DoExecuteImpl() {
         return statusConclusion;
     }
 
+    if (statusConclusion.IsFail()) {
+        return statusConclusion;
+    }
     return true;
 }
 
