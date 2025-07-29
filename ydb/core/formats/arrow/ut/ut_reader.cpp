@@ -1,19 +1,13 @@
-<<<<<<< HEAD
 #include <program/collection.h>
 #include <program/execution.h>
 #include <util/stream/file.h>
-=======
->>>>>>> official/main
 #include <ydb/core/formats/arrow/arrow_batch_builder.h>
 #include <ydb/core/formats/arrow/arrow_helpers.h>
 #include <ydb/core/formats/arrow/reader/merger.h>
 #include <ydb/core/formats/arrow/reader/position.h>
 #include <ydb/core/formats/arrow/reader/result_builder.h>
-<<<<<<< HEAD
 #include <ydb/core/tx/columnshard/engines/reader/common_reader/constructor/resolver.h>
 #include <ydb/core/tx/program/program.h>
-=======
->>>>>>> official/main
 
 #include <library/cpp/testing/unittest/registar.h>
 #include <library/cpp/json/json_reader.h>
