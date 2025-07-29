@@ -5,6 +5,8 @@
 #include <ydb/core/formats/arrow/program/collection.h>
 #include <ydb/core/formats/arrow/program/execution.h>
 
+#include <fstream>
+
 namespace NKikimr::NOlap {
 
 const THashSet<ui32>& TProgramContainer::GetSourceColumns() const {
@@ -56,6 +58,7 @@ TConclusionStatus TProgramContainer::Init(
     const NArrow::NSSA::IColumnResolver& columnResolver, const NKikimrSSA::TOlapProgram& olapProgramProto) noexcept {
     NKikimrSSA::TProgram programProto;
     if (!programProto.ParseFromString(olapProgramProto.GetProgram())) {
+        Cerr << "Can't parse TProgram protobuf" << Endl;
         return TConclusionStatus::Fail("Can't parse TProgram protobuf");
     }
 
@@ -70,6 +73,7 @@ TConclusionStatus TProgramContainer::Init(
 
     auto initStatus = Init(columnResolver, ProgramProto);
     if (initStatus.IsFail()) {
+        Cerr << "Can't parse TProgram protobuf 2" << Endl;
         return initStatus;
     }
     return TConclusionStatus::Success();
@@ -81,6 +85,7 @@ TConclusionStatus TProgramContainer::Init(
     Y_ABORT_UNLESS(!OverrideProcessingColumnsVector);
 
     NKikimrSSA::TOlapProgram olapProgramProto;
+    Cerr << "programType: " << (int)programType << Endl;
 
     switch (programType) {
         case NKikimrSchemeOp::EOlapProgramType::OLAP_PROGRAM_SSA_PROGRAM_WITH_PARAMETERS:
@@ -92,6 +97,13 @@ TConclusionStatus TProgramContainer::Init(
         default:
             return TConclusionStatus::Fail(TStringBuilder() << "Unsupported olap program version: " << (ui32)programType);
     }
+
+    // // Write olapProgramProto to file
+    // std::ofstream outputFile;
+    // static int v = 0;
+    // outputFile.open("/tmp/SERSERSER" + std::to_string(v++), std::ios::binary);
+    // Cerr << "SER OK: " << olapProgramProto.SerializeToOstream(&outputFile) << Endl;
+    // outputFile.close();
 
     return Init(columnResolver, olapProgramProto);
 }

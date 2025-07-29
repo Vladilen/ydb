@@ -9,6 +9,7 @@ PEERDIR(
     ydb/core/formats/arrow/program
     ydb/core/base
     ydb/library/formats/arrow
+    ydb/core/tx/program
 
     # for NYql::NUdf alloc stuff used in binary_json
     yql/essentials/public/udf/service/exception_policy

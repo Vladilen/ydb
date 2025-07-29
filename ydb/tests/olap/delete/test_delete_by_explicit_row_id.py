@@ -118,3 +118,47 @@ class TestDeleteByExplicitRowId(DeleteTestBase):
         self._test_single_column_pk(rows_to_insert=10, rows_to_delete=10, iterations=10)
         self._test_two_columns_pk(rows_to_insert=1000, rows_to_delete=10, iterations=10)
         self._test_two_columns_pk(rows_to_insert=10, rows_to_delete=10, iterations=10)
+
+    def test_insert_select(self):
+        table_path = f"{self._get_test_dir()}/testTable111"
+        self.ydb_client.query(f"DROP TABLE IF EXISTS `{table_path}`;")
+        # self.ydb_client.query(
+        #     f"""
+        #     CREATE TABLE `{table_path}` (
+        #         CounterID Uint64,
+        #         Data String,
+        #         Deleted Uint8,
+        #         EventTime Uint64 NOT NULL,
+        #         ID Uint64 NOT NULL,
+        #         Type Uint64,
+        #         UpdateTime Uint64,
+        #         UserID Uint64,
+        #         UserIDHash Uint64,
+        #         Version Uint64,
+        #         PRIMARY KEY(EventTime, ID)
+        #     )
+        #     WITH (
+        #         STORE = COLUMN
+        #     )
+        #     """
+        # )
+        self.ydb_client.query(
+            f"""
+            CREATE TABLE `{table_path}` (
+                EventTime Uint64 NOT NULL,
+                ID Uint64 NOT NULL,
+                UserID Uint64,
+                PRIMARY KEY(EventTime, ID)
+            )
+            WITH (
+                STORE = COLUMN
+            )
+            """
+        )
+
+        self.ydb_client.query(f"UPSERT INTO `{table_path}` (EventTime, ID) VALUES (1, 1), (2, 2), (3, 3);")
+        self.ydb_client.query(f"UPSERT INTO `{table_path}` (EventTime, ID, UserID) VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);")
+        self.ydb_client.query(f"UPSERT INTO `{table_path}` (EventTime, ID) VALUES (1, 1), (2, 2), (3, 3);")
+        # self.ydb_client.query(f"REPLACE INTO `{table_path}` (EventTime, ID) VALUES (1, 1), (2, 2), (3, 3);")
+
+        self.ydb_client.query(f"SELECT UserID FROM `{table_path}` limit 10;")

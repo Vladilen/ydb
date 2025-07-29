@@ -231,15 +231,15 @@ namespace NKikimr {
                 }
             }
 
-            if (!defaultFamily->HasStorageConfig() ||
-                !defaultFamily->GetStorageConfig().HasSysLog() ||
-                !defaultFamily->GetStorageConfig().HasLog())
-            {
-                *code = Ydb::StatusIds::BAD_REQUEST;
-                *error = TStringBuilder()
-                    << "Column families cannot be used without tablet_commit_log0 and tablet_commit_log1 media defined";
-                return false;
-            }
+            // if (!defaultFamily->HasStorageConfig() ||
+            //     !defaultFamily->GetStorageConfig().HasSysLog() ||
+            //     !defaultFamily->GetStorageConfig().HasLog())
+            // {
+            //     *code = Ydb::StatusIds::BAD_REQUEST;
+            //     *error = TStringBuilder()
+            //         << "Column families cannot be used without tablet_commit_log0 and tablet_commit_log1 media defined";
+            //     return false;
+            // }
 
             return true;
         }

@@ -22,7 +22,7 @@ class DeleteTestBase(object):
     @classmethod
     def _setup_ydb(cls):
         ydb_path = yatest.common.build_path(os.environ.get("YDB_DRIVER_BINARY"))
-        logger.info(yatest.common.execute([ydb_path, "-V"], wait=True).stdout.decode("utf-8"))
+        logger.info(yatest.common.execute([ydb_path, "-V", "--log-level", "7"], wait=True).stdout.decode("utf-8"))
         config = KikimrConfigGenerator()
         cls.cluster = KiKiMR(config)
         cls.cluster.start()
