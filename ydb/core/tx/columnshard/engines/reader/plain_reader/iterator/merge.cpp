@@ -28,7 +28,7 @@ std::optional<NArrow::NMerger::TCursor> TBaseMergeTask::DrainMergerLinearScan(co
     return lastResultPosition;
 }
 
-TConclusionStatus TBaseMergeTask::PrepareResultBatch() {
+TConclusionStatus TBaseMergeTask::PrepareResultBatch(int cur) {
     if (!ResultBatch || ResultBatch->num_rows() == 0) {
         AllocationGuard = nullptr;
         ResultBatch = nullptr;
@@ -42,7 +42,7 @@ TConclusionStatus TBaseMergeTask::PrepareResultBatch() {
         AFL_VERIFY((ui32)ResultBatch->num_columns() == Context->GetProgramInputColumns()->GetColumnNamesVector().size());
         auto accessors = std::make_shared<NArrow::NAccessor::TAccessorsCollection>(ResultBatch, *Context->GetCommonContext()->GetResolver());
         auto& program = Context->GetReadMetadata()->GetProgram();
-        Cerr << "Applying program: " << program.DebugString() << Endl;
+        AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD_SCAN)("step", "Applying program")("current", cur)("program", program.DebugString());
         auto conclusion = program.ApplyProgram(accessors, std::make_shared<NArrow::NSSA::TFakeDataSource>());
         if (conclusion.IsFail()) {
             return conclusion;
@@ -120,7 +120,7 @@ TConclusion<bool> TStartMergeTask::DoExecuteImpl() {
             if (Context->GetCommonContext()->IsReverse()) {
                 ResultBatch = NArrow::ReverseRecords(ResultBatch);
             }
-            auto conclusion = PrepareResultBatch();
+            auto conclusion = PrepareResultBatch(current);
             if (conclusion.IsFail()) {
                 return conclusion;
             }
@@ -180,13 +180,9 @@ TConclusion<bool> TStartMergeTask::DoExecuteImpl() {
         LastPK = lastResultPosition->ExtractSortingPosition(MergingContext->GetFinish().GetSortFields());
     }
     AFL_VERIFY(!!LastPK == (!!ResultBatch && ResultBatch->num_rows()));
-    auto statusConclusion = PrepareResultBatch();
+    AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD_SCAN)("step", "result before prepare:")("current", current)("ResultBatch", ResultBatch ? ResultBatch->ToString() : "null");
+    auto statusConclusion = PrepareResultBatch(current);
     AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD_SCAN)("step", "return result")("current", current)("ResultBatch", ResultBatch ? ResultBatch->ToString() : "null");
-    Cerr << "Result: " << (ResultBatch ? ResultBatch->ToString() : "null") << Endl;
-    if (statusConclusion.IsFail()) {
-        return statusConclusion;
-    }
-
     if (statusConclusion.IsFail()) {
         return statusConclusion;
     }

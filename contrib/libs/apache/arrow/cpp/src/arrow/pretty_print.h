@@ -36,7 +36,7 @@ struct PrettyPrintOptions {
   PrettyPrintOptions() = default;
 
   PrettyPrintOptions(int indent_arg,  // NOLINT runtime/explicit
-                     int window_arg = 10000000, int indent_size_arg = 2,
+                     int window_arg = 1000000000, int indent_size_arg = 2,
                      std::string null_rep_arg = "null", bool skip_new_lines_arg = false,
                      bool truncate_metadata_arg = true)
       : indent(indent_arg),
@@ -55,7 +55,7 @@ struct PrettyPrintOptions {
   int indent_size = 2;
 
   /// Maximum number of elements to show at the beginning and at the end.
-  int window = 10000000;
+  int window = 1000000000;
 
   /// String to use for representing a null value, defaults to "null"
   std::string null_rep = "null";

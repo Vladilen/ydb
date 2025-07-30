@@ -70,7 +70,7 @@ protected:
 
     [[nodiscard]] std::optional<NArrow::NMerger::TCursor> DrainMergerLinearScan(const std::optional<ui32> resultBufferLimit);
 
-    TConclusionStatus PrepareResultBatch();
+    TConclusionStatus PrepareResultBatch(int cur = 0);
 
 private:
     virtual bool DoApply(IDataReader& indexedDataRead) override;

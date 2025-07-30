@@ -28,7 +28,7 @@ TReadContext::TReadContext(const std::shared_ptr<IStoragesManager>& storagesMana
     , ConveyorProcessGuard(NConveyorComposite::TScanServiceOperator::StartProcess(ScanId, ::ToString(ScanId), cpuLimits)) {
     Y_ABORT_UNLESS(ReadMetadata);
     if (ReadMetadata->HasResultSchema()) {
-        Cerr << "Index info: " << ReadMetadata->GetResultSchema()->GetIndexInfo().DebugString() << Endl;
+        AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD_SCAN)("Index info", ReadMetadata->GetResultSchema()->GetIndexInfo().DebugString());
         Resolver = std::make_shared<NCommon::TIndexColumnResolver>(ReadMetadata->GetResultSchema()->GetIndexInfo());
     }
 }

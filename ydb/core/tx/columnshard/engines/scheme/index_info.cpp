@@ -339,7 +339,7 @@ std::vector<TNameTypeInfo> GetColumns(const NTable::TScheme::TTableSchema& table
 
 std::optional<TIndexInfo> TIndexInfo::BuildFromProto(const ui64 presetId, const NKikimrSchemeOp::TColumnTableSchema& schema,
     const std::shared_ptr<IStoragesManager>& operators, const std::shared_ptr<TSchemaObjectsCache>& cache) {
-    Cerr << "BuildFromProto: " << presetId << "; schema: " << schema.ShortDebugString() << Endl;
+    AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD_SCAN)("BuildFromProto", presetId)("schema", schema.ShortDebugString());
     TIndexInfo result(presetId);
     if (!result.DeserializeFromProto(schema, operators, cache)) {
         return std::nullopt;
