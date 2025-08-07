@@ -304,6 +304,38 @@ Examples of components managed by the memory controller:
 
 Memory limits can be configured to control overall memory usage, ensuring the database operates efficiently within the available resources.
 
+
+Memory consumption overview:
+```plain
++==========================================================================================+
+|                                  Total Process Memory                                    |
+|                                    (HardLimit / 100%)                                    |
+|                                                                                          |
+|   +----------------------------------------------------------------------------------+   |
+|   |                                  Soft Limit                                      |   |
+|   |                                                                                  |   |
+|   |  +-----------------------+   +-------------------+   +-------------------------+ |   |
+|   |  |      SharedCache      |   |     MemTable      |   |       Activities        | |   |
+|   |  |    (min/max limit)    |   | (min/max limit)   |   |       (% limit)         | |   |
+|   |  |  +------------------+ |   +-------------------+   |  +-------------------+  | |   |
+|   |  |  | Column Tables    | |                           |  |       KQP         |  | |   |
+|   |  |  |     Caches       | |                           |  | (Query Execution) |  | |   |
+|   |  |  +------------------+ |                           |  |  +-------------+  |  | |   |
+|   |  |  +------------------+ |                           |  |  |Column Tables|  |  | |   |
+|   |  |  | Column Tables    | |                           |  |  |    Scan     |  |  | |   |
+|   |  |  |   Compaction     | |                           |  |  +-------------+  |  | |   |
+|   |  |  +------------------+ |                           |  +-------------------+  | |   |
+|   |  +-----------------------+                           |  +-------------------+  | |   |
+|   |                                                      |  |   Compaction      |  | |   |
+|   |                                                      |  +-------------------+  | |   |
+|   |                                                      +-------------------------+ |   |
+|   |                                                                                  |   |
+|   +----------------------------------------------------------------------------------+   |
+|                                                                                          |
+|  (other auxiliary and uncontrolled memory)                                               |
++==========================================================================================+
+```
+
 ### Hard memory limit {#hard-memory-limit}
 
 The hard memory limit specifies the total amount of memory available to {{ ydb-short-name }} process.
@@ -373,6 +405,7 @@ memory_controller_config:
 The activity components include:
 
 - KQP
+- Compaction
 
 The memory limit for each activity component specifies the maximum amount of memory it can attempt to use. However, to prevent the {{ ydb-short-name }} process from exceeding the soft memory limit, the total consumption of activity components is further constrained by an additional limit known as the activities memory limit. If the total memory usage of the activity components exceeds this limit, any additional memory requests will be denied.
 
@@ -412,6 +445,7 @@ $Max(shared\_cache\_min\_percent * hard\_limit\_bytes / 100, shared\_cache\_min\
 | `mem_table_min_percent`&nbsp;/<br/>`mem_table_min_bytes` | 1% | Minimum threshold for the MemTable memory limit. |
 | `mem_table_max_percent`&nbsp;/<br/>`mem_table_max_bytes` | 3% | Maximum threshold for the MemTable memory limit. |
 | `query_execution_limit_percent`&nbsp;/<br/>`query_execution_limit_bytes` | 20% | KQP memory limit. |
+| `compaction_limit_percent`&nbsp;/<br/>`compaction_limit_bytes` | 10% | Compaction memory limit. |
 
 ## blob_storage_config: Static cluster group {#blob-storage-config}
 
