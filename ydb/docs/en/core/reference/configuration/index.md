@@ -357,6 +357,7 @@ The cache components include:
 
 - Shared cache
 - MemTable
+- Compaction
 
 Each cache component's limits are dynamically recalculated every second to ensure that each component consumes memory proportionally to its limit thresholds while the total consumed memory stays close to the target memory utilization.
 
@@ -377,7 +378,6 @@ memory_controller_config:
 The activity components include:
 
 - KQP
-- Compaction
 
 The memory limit for each activity component specifies the maximum amount of memory it can attempt to use. However, to prevent the {{ ydb-short-name }} process from exceeding the soft memory limit, the total consumption of activity components is further constrained by an additional limit known as the activities memory limit. If the total memory usage of the activity components exceeds this limit, any additional memory requests will be denied.
 
