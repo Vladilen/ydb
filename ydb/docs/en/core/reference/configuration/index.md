@@ -306,7 +306,7 @@ Memory limits can be configured to control overall memory usage, ensuring the da
 
 
 Memory consumption overview:
-![Memory Controller](_assets/memory_controller.png)
+![Memory Controller](../../_assets/memory_controller.png)
 
 ### Hard memory limit {#hard-memory-limit}
 

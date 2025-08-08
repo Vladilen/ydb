@@ -522,7 +522,7 @@ actor_system_config:
 Лимиты памяти могут быть настроены для контроля общего использования памяти, обеспечивая эффективную работу базы данных в рамках доступных ресурсов.
 
 Общий вид потребления памяти:
-![Memory Controller](_assets/memory_controller.png)
+![Memory Controller](../../_assets/memory_controller.png)
 
 ### Жёсткий лимит памяти {#hard-memory-limit}
 
