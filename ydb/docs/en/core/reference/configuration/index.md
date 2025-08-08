@@ -365,6 +365,8 @@ The minimum memory limit threshold for cache components isn't reserved, meaning 
 
 If needed, both the minimum and maximum thresholds should be overridden; otherwise, any missing threshold will have a default value.
 
+The percentage limit for the compaction cache component is specified as a fraction of the shared cache, not of the total soft memory limit.
+
 Example of the `memory_controller_config` section with specified shared cache limits:
 
 ```yaml
