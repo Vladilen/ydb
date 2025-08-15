@@ -746,13 +746,13 @@ public:
 
     void OnCommit(ui64) override {
         if (WriteResult->IsError()) {
-            LOG_ERROR_S(*TlsActivationContext, NKikimrServices::TX_DATASHARD, 
-                "Complete volatile write [" << Step << " : " << TxId << "] from " << Self->TabletID() 
-                << " at tablet " << Self->TabletID() << ", error:  " << WriteResult->GetError());
+            LOG_ERROR_S(*TlsActivationContext, NKikimrServices::TX_DATASHARD,
+                "Complete volatile write [" << Step << " : " << TxId << "] from " << Self->TabletID()
+                                            << " at tablet " << Self->TabletID() << ", error:  " << WriteResult->GetError());
         } else {
-            LOG_DEBUG_S(*TlsActivationContext, NKikimrServices::TX_DATASHARD, 
-                "Complete volatile write [" << Step << " : " << TxId << "] from " << Self->TabletID() 
-                << " at tablet " << Self->TabletID() << " send result to client " << Target);
+            LOG_DEBUG_S(*TlsActivationContext, NKikimrServices::TX_DATASHARD,
+                "Complete volatile write [" << Step << " : " << TxId << "] from " << Self->TabletID()
+                                            << " at tablet " << Self->TabletID() << " send result to client " << Target);
         }
 
         LWTRACK(ProposeTransactionSendResult, WriteResult->GetOrbit());
@@ -3405,7 +3405,7 @@ void TDataShard::Handle(TEvPrivate::TEvDelayedProposeTransaction::TPtr &ev, cons
                     if (datashardTransactionSpan) {
                         datashardTransactionSpan.Attribute("Shard", std::to_string(TabletID()));
                     }
-                    
+
                     Execute(new TTxProposeTransactionBase(this, std::move(event), item.ReceivedAt, item.TieBreakerIndex, /* delayed */ true, std::move(datashardTransactionSpan)), ctx);
                     return;
                 }
@@ -3446,8 +3446,6 @@ void TDataShard::Handle(TEvPrivate::TEvDelayedProposeTransaction::TPtr &ev, cons
             default:
                 Y_ENSURE(false, "Unexpected event type " << item.Event->GetTypeRewrite());
         }
-
-        
     }
 
     // N.B. Ack directly since we didn't start any delayed transactions
@@ -3630,6 +3628,7 @@ TDataShard::TPersistentTablet& TDataShard::SendPersistent(ui64 tabletId, IEventB
 void TDataShard::Handle(TEvPipeCache::TEvDeliveryProblem::TPtr& ev, const TActorContext& ctx) {
     auto* msg = ev->Get();
 
+    AFL_WARN(NKikimrServices::TX_DATASHARD)("event", "NOT DELIVERED")("Sender", ev->Sender)("Recipient", ev->Recipient)("TabletId", msg->TabletId)("IsDeleted", msg->IsDeleted)("NotDelivered", msg->NotDelivered)("Connected", msg->Connected);
     if (!msg->Connected) {
         LOG_NOTICE_S(ctx, NKikimrServices::TX_DATASHARD, "Client pipe to tablet " << msg->TabletId
             << " from " << TabletID() << " failed to connect (IsDeleted=" << (msg->IsDeleted ? "true" : "false") << ")");

@@ -21,16 +21,20 @@ public:
     void RemoveOverloadSubscriber(TSeqNo seqNo, const TActorId& recipient, const TActorId& sender);
 
     template <typename TResponseRecord>
-    void SetOverloadSubscribed(const std::optional<TSeqNo>& overloadSubscribe, const TActorId& recipient, const TActorId& sender, const ERejectReasons rejectReasons, TResponseRecord& responseRecord) {
+    void SetOverloadSubscribed(const std::optional<TSeqNo>& overloadSubscribe, const TActorId& recipient, const TActorId& sender, const TActorContext& ctx,
+        const ERejectReasons rejectReasons, TResponseRecord& responseRecord) {
         if (rejectReasons == ERejectReasons::None || !overloadSubscribe || !HasPipeServer(recipient)) {
+            if (!HasPipeServer(recipient)) {
+                AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "NO PIPE SERVER ID")("pipeServerId", recipient);
+            }
             return;
         }
 
         TSeqNo seqNo = overloadSubscribe.value();
-        auto allowed = ERejectReasons::YellowChannels | ERejectReasons::OverloadByShardWritesInFly | ERejectReasons::OverloadByShardWritesSizeInFly;
+        auto allowed = (ERejectReasons::YellowChannels | ERejectReasons::OverloadByShardWritesInFly | ERejectReasons::OverloadByShardWritesSizeInFly);
         if ((rejectReasons & allowed) != ERejectReasons::None &&
             (rejectReasons - allowed) == ERejectReasons::None) {
-            if (AddOverloadSubscriber(recipient, sender, seqNo, rejectReasons)) {
+            if (AddOverloadSubscriber(recipient, sender, ctx, seqNo, rejectReasons)) {
                 responseRecord.SetOverloadSubscribed(seqNo);
             }
         }
@@ -42,6 +46,7 @@ private:
     struct TOverloadSubscriber {
         TSeqNo SeqNo = 0;
         ERejectReasons Reasons = ERejectReasons::None;
+        std::unique_ptr<TActorContext> ctx;
     };
 
     struct TPipeServerInfo
@@ -54,7 +59,7 @@ private:
 
     void DiscardOverloadSubscribers(TPipeServerInfo& pipeServer);
     bool HasPipeServer(const TActorId& pipeServerId);
-    bool AddOverloadSubscriber(const TActorId& pipeServerId, const TActorId& actorId, TSeqNo seqNo, ERejectReasons reasons);
+    bool AddOverloadSubscriber(const TActorId& pipeServerId, const TActorId& actorId, const TActorContext& ctx, TSeqNo seqNo, ERejectReasons reasons);
 
     THashMap<NActors::TActorId, TPipeServerInfo> PipeServers;
 

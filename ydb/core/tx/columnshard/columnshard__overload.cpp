@@ -49,15 +49,19 @@ TColumnShard::EOverloadStatus TColumnShard::CheckOverloadedImmediate(const TInte
 }
 
 void TColumnShard::UpdateOverloadsStatus() {
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "CHECK STATS");
     if (Counters.GetWritesMonitor()->GetWritesInFlight() < GetShardWritesInFlyLimit()) {
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "WRITES IN FLIGHT STATS OK");
         OverloadSubscribers.NotifyOverloadSubscribers(NOverload::ERejectReason::OverloadByShardWritesInFly, SelfId(), TabletID());
     }
     if (Counters.GetWritesMonitor()->GetWritesSizeInFlight() < GetShardWritesSizeInFlyLimit()) {
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "WRITES SIZE IN FLIGHT STATS OK");
         OverloadSubscribers.NotifyOverloadSubscribers(NOverload::ERejectReason::OverloadByShardWritesSizeInFly, SelfId(), TabletID());
     }
 }
 
 void TColumnShard::Handle(TEvColumnShard::TEvOverloadUnsubscribe::TPtr& ev, const TActorContext&) {
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "TEvOverloadUnsubscribe");
     OverloadSubscribers.RemoveOverloadSubscriber(ev->Get()->Record.GetSeqNo(), ev->Recipient, ev->Sender);
 }
 

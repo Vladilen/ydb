@@ -8,6 +8,7 @@
 #include "probes.h"
 #include "debug.h"
 #include <ydb/library/actors/util/datetime.h>
+#include <ydb/library/actors/core/log.h>
 
 namespace NActors {
     LWTRACE_USING(ACTORLIB_PROVIDER);
@@ -102,17 +103,27 @@ namespace NActors {
         if (TlsThreadContext) {
             TlsThreadContext->IsCurrentRecipientAService = ev->Recipient.IsService();
         }
+        bool is_overload = ev && ev->is_overload;
 
         if (TMailbox* mailbox = MailboxTable->Get(ev->GetRecipientRewrite().Hint())) {
             switch (mailbox->Push(ev)) {
                 case EMailboxPush::Pushed:
+                    if (is_overload) {
+                        AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "PUSHED");
+                    }
                     return true;
                 case EMailboxPush::Locked:
                     mailbox->ScheduleMoment = GetCycleCountFast();
                     ScheduleActivation(mailbox);
+                    if (is_overload) {
+                        AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "LOCKED");
+                    }
                     return true;
                 case EMailboxPush::Free:
                     // message cannot be delivered
+                    if (is_overload) {
+                        AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "FREE");
+                    }
                     break;
             }
         }

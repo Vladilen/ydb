@@ -321,6 +321,9 @@ void TColumnShard::Handle(NEvents::TDataEvents::TEvWrite::TPtr& ev, const TActor
     const auto& record = ev->Get()->Record;
     const auto source = ev->Sender;
     const auto cookie = ev->Cookie;
+
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "NEvents::TDataEvents::TEvWrite received")("source", source)("Recipient", ev->Recipient)("interconnectSession", ev->InterconnectSession);
+
     std::optional<TDuration> writeTimeout;
     if (record.HasTimeoutSeconds()) {
         writeTimeout = TDuration::Seconds(record.GetTimeoutSeconds());
@@ -448,7 +451,8 @@ void TColumnShard::Handle(NEvents::TDataEvents::TEvWrite::TPtr& ev, const TActor
 
         if (!outOfSpace && record.HasOverloadSubscribe()) {
             const auto rejectReasons = NOverload::MakeRejectReasons(overloadStatus);
-            OverloadSubscribers.SetOverloadSubscribed(record.GetOverloadSubscribe(), ev->Recipient, ev->Sender, rejectReasons, result->Record);
+            OverloadSubscribers.SetOverloadSubscribed(record.GetOverloadSubscribe(), ev->Recipient, ev->Sender, ctx, rejectReasons, result->Record);
+            AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "NOTIFY OVERLOAD")("cookie", cookie);
         }
         OverloadWriteFail(overloadStatus,
             NEvWrite::TWriteMeta(0, pathId, source, {}, TGUID::CreateTimebased().AsGuidString(),

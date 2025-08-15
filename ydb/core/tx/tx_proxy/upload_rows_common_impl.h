@@ -1229,6 +1229,8 @@ private:
         ui64 shardId = record.GetTabletID();
         ui64 seqNo = record.GetSeqNo();
 
+        AFL_WARN(NKikimrServices::TX_DATASHARD)("event", "NOTIFY NOT OVERLOAD RECEIVED")("Sender", ev->Sender)("Recipient", ev->Recipient);
+
         Span && Span.Event("TEvOverloadReady", {{"shardId", long(shardId)}});
 
         if (auto* state = ShardUploadRetryStates.FindPtr(shardId)) {

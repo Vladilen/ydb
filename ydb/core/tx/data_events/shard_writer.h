@@ -184,6 +184,7 @@ private:
         Send(LeaderPipeCache, new TEvPipeCache::TEvForward(event.Release(), ShardId, true), IEventHandle::FlagTrackDelivery, 0,
             ActorSpan.GetTraceId());
     }
+    int current = 0;
 
 public:
     TShardWriter(const ui64 shardId, const ui64 tableId, const ui64 schemaVersion, const TString& dedupId, const IShardInfo::TPtr& data,
@@ -213,5 +214,6 @@ protected:
 private:
     bool RetryWriteRequest(const bool delayed = true);
     bool IsMaxRetriesReached() const;
+    void OnFinish();
 };
 }   // namespace NKikimr::NEvWrite

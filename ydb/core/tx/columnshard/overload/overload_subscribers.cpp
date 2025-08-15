@@ -11,17 +11,15 @@ namespace {
 void SendViaSession(const TActorId& sessionId,
     const TActorId& target,
     const TActorId& src,
-    IEventBase* event,
-    ui32 flags = 0,
-    ui64 cookie = 0,
-    NWilson::TTraceId traceId = {}) {
-    THolder<IEventHandle> ev = MakeHolder<IEventHandle>(target, src, event, flags, cookie, nullptr, std::move(traceId));
-
+    IEventBase* event) {
+    THolder<IEventHandle> ev = MakeHolder<IEventHandle>(target, src, event, 0, 0);
     if (sessionId) {
         ev->Rewrite(TEvInterconnect::EvForward, sessionId);
     }
+    ev->is_overload = true;
 
-    TActivationContext::Send(ev.Release());
+    bool result = TActivationContext::Send(ev.Release());
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "!!!! SendViaSession")("sessionId", sessionId)("target", target)("src", src)("result", result);
 }
 
 } // namespace
@@ -34,6 +32,8 @@ void TOverloadSubscribers::AddPipeServer(const NActors::TActorId& serverId, cons
     AFL_VERIFY(res.second)("serverId", serverId);
 
     res.first->second.InterconnectSession = interconnectSession;
+
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "ADD PIPE SERVER")("serverId", serverId)("interconnectSession", interconnectSession);
 }
 
 void TOverloadSubscribers::RemovePipeServer(const NActors::TActorId& serverId) {
@@ -56,14 +56,18 @@ void TOverloadSubscribers::DiscardOverloadSubscribers(TPipeServerInfo& pipeServe
     PipeServersWithOverloadSubscribers.Remove(&pipeServer);
 }
 
-bool TOverloadSubscribers::AddOverloadSubscriber(const TActorId& pipeServerId, const TActorId& actorId, ui64 seqNo, ERejectReasons reasons) {
+bool TOverloadSubscribers::AddOverloadSubscriber(const TActorId& pipeServerId, const TActorId& actorId, const TActorContext& ctx, ui64 seqNo, ERejectReasons reasons) {
     auto it = PipeServers.find(pipeServerId);
     if (it == PipeServers.end()) {
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "NO PIPE SERVER ID")("pipeServerId", pipeServerId);
         return false;
     }
 
     bool wasEmpty = it->second.OverloadSubscribers.empty();
     auto& entry = it->second.OverloadSubscribers[actorId];
+    if (!entry.ctx) {
+        entry.ctx = std::make_unique<TActorContext>(ctx);
+    }
     if (entry.SeqNo <= seqNo) {
         entry.SeqNo = seqNo;
         // Increment counter for every new reason
@@ -111,6 +115,7 @@ void TOverloadSubscribers::NotifyOverloadSubscribers(ERejectReason reason, const
                     sourceActorId,
                     new TEvColumnShard::TEvOverloadReady(sourceTabletId, entry.SeqNo));
                 pipeServer->OverloadSubscribers.erase(current);
+                AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "!!!! NOTIFY NO OVERLOAD")("actorId", actorId)("seqNo", entry.SeqNo)("pipeServer->InterconnectSession", pipeServer->InterconnectSession)("sourceActorId", sourceActorId);
             }
         }
         if (!pipeServer->OverloadSubscribers.empty()) {
@@ -132,6 +137,7 @@ void TOverloadSubscribers::NotifyAllOverloadSubscribers(const TActorId& sourceAc
                 actorId,
                 sourceActorId,
                 new TEvColumnShard::TEvOverloadReady(sourceTabletId, entry.SeqNo));
+            AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "!!!! NOTIFY NO OVERLOAD ALL");
         }
         pipeServer->OverloadSubscribers.clear();
         clearedSubscribers = true;
@@ -148,6 +154,7 @@ void TOverloadSubscribers::RemoveOverloadSubscriber(TSeqNo seqNo, const TActorId
     if (auto* pipeServer = PipeServers.FindPtr(recipient)) {
         auto it = pipeServer->OverloadSubscribers.find(sender);
         if (it != pipeServer->OverloadSubscribers.end()) {
+            AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "DELETED SOME!!!111");
             if (it->second.SeqNo == seqNo) {
                 EnumerateRejectReasons(it->second.Reasons, [&](ERejectReason reason) {
                     OverloadSubscribersByReason[RejectReasonIndex(reason)]--;
@@ -157,6 +164,8 @@ void TOverloadSubscribers::RemoveOverloadSubscriber(TSeqNo seqNo, const TActorId
                     PipeServersWithOverloadSubscribers.Remove(pipeServer);
                 }
             }
+        } else {
+            AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "NO ONE SOME!!!111");
         }
     }
 }

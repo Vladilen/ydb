@@ -184,6 +184,7 @@ namespace NActors {
         THolder<TOnNondelivery> OnNondeliveryHolder; // only for local events
 
     public:
+        bool is_overload = false;
         void Rewrite(ui32 typeRewrite, TActorId recipientRewrite) {
             RewriteRecipient = recipientRewrite;
             RewriteType = typeRewrite;

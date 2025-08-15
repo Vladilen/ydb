@@ -67,6 +67,7 @@ void TDataShard::NotifyOverloadSubscribers(ERejectReason reason) {
                     actorId,
                     SelfId(),
                     new TEvDataShard::TEvOverloadReady(TabletID(), entry.SeqNo));
+                AFL_WARN(NKikimrServices::TX_DATASHARD)("event", "!!!! NOTIFY NO OVERLOAD")("actorId", actorId)("seqNo", entry.SeqNo)("pipeServer->InterconnectSession", pipeServer->InterconnectSession)("sourceActorId", SelfId());
                 pipeServer->OverloadSubscribers.erase(current);
             }
         }

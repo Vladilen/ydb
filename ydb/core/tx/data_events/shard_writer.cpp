@@ -8,14 +8,15 @@
 
 namespace NKikimr::NEvWrite {
 
-    TWritersController::TWritersController(const ui32 writesCount, const NActors::TActorIdentity& longTxActorId, const NLongTxService::TLongTxId& longTxId)
-        : WritesCount(writesCount)
-        , LongTxActorId(longTxActorId)
-        , LongTxId(longTxId)
-    {
-        Y_ABORT_UNLESS(writesCount);
-        WriteIds.resize(WritesCount.Val());
-    }
+static std::atomic_int kek = 0;
+
+TWritersController::TWritersController(const ui32 writesCount, const NActors::TActorIdentity& longTxActorId, const NLongTxService::TLongTxId& longTxId)
+    : WritesCount(writesCount)
+    , LongTxActorId(longTxActorId)
+    , LongTxId(longTxId) {
+    Y_ABORT_UNLESS(writesCount);
+    WriteIds.resize(WritesCount.Val());
+}
 
     void TWritersController::OnSuccess(const ui64 shardId, const ui64 writeId, const ui32 writePartId) {
         WriteIds[WritesIndex.Inc() - 1] = TWriteIdForShard(shardId, writeId, writePartId);
@@ -54,6 +55,7 @@ namespace NKikimr::NEvWrite {
         , Timeout(timeout)
         , RetryBySubscription(AppData()->FeatureFlags.GetEnableCSOverloadsSubscriptionRetries())
     {
+        current = kek.fetch_add(1);
     }
 
     void TShardWriter::SendWriteRequest() {
@@ -65,6 +67,8 @@ namespace NKikimr::NEvWrite {
         if (RetryBySubscription) {
             ev->Record.SetOverloadSubscribe(++LastOverloadSeqNo);
         }
+
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("current", current)("event", "Sending data")("LeaderPipeCache", LeaderPipeCache)("LastOverloadSeqNo", LastOverloadSeqNo)("ShardId", ShardId);
         SendToTablet(std::move(ev));
     }
 
@@ -82,6 +86,7 @@ namespace NKikimr::NEvWrite {
 
         const auto ydbStatus = msg->GetStatus();
         if (ydbStatus == NKikimrDataEvents::TEvWriteResult::STATUS_OVERLOADED) {
+            AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("current", current)("event", "TEvWriteResult OVERLOADED!!!");
             if (RetryBySubscription) {
                 if (msg->Record.HasOverloadSubscribed() && msg->Record.GetOverloadSubscribed() == LastOverloadSeqNo && !IsMaxRetriesReached()) {
                     return;
@@ -93,6 +98,7 @@ namespace NKikimr::NEvWrite {
 
         auto gPassAway = PassAwayGuard();
         if (ydbStatus != NKikimrDataEvents::TEvWriteResult::STATUS_COMPLETED) {
+            AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("current", current)("event", "TEvWriteResult NOT GOOD");
             auto statusInfo = NEvWrite::NErrorCodes::TOperator::GetStatusInfo(ydbStatus).DetachResult();
             const auto issues = msg->Record.GetIssues();
             const TString issueString = issues.empty() ? "unspecified error" : issues[0].message();
@@ -102,6 +108,8 @@ namespace NKikimr::NEvWrite {
             return;
         }
 
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("current", current)("event", "TEvWriteResult OK");
+
         if (RetryBySubscription) {
             LastOverloadSeqNo = 0;
         }
@@ -109,13 +117,18 @@ namespace NKikimr::NEvWrite {
     }
 
     void TShardWriter::Handle(TEvColumnShard::TEvOverloadReady::TPtr& ev) {
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("current", current)("event", "NOTIFY NOT OVERLOAD RECEIVED")("Sender", ev->Sender)("Recipient", ev->Recipient);
+
         const auto& record = ev->Get()->Record;
 
         AFL_VERIFY(RetryBySubscription);
         AFL_VERIFY(record.GetSeqNo() == LastOverloadSeqNo)("event_seq_no", record.GetSeqNo())("last_overload_seq_no", LastOverloadSeqNo);
         AFL_VERIFY(record.GetTabletID() == ShardId)("ev_tablet_id", record.GetTabletID())("shard_id", ShardId);
 
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("current", current)("event", "Send data again");
+
         if (!RetryWriteRequest(false)) {
+            AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("current", current)("event", "Send data again FAILED");
             auto gPassAway = PassAwayGuard();
             const TString errMsg = TStringBuilder() << "Shard " << ShardId << " is still overloaded after " << NumRetries << " retries";
             ExternalController->OnFail(Ydb::StatusIds::OVERLOADED, errMsg);
@@ -126,6 +139,8 @@ namespace NKikimr::NEvWrite {
         NWilson::TProfileSpan pSpan(0, ActorSpan.GetTraceId(), "DeliveryProblem");
         const auto* msg = ev->Get();
         Y_ABORT_UNLESS(msg->TabletId == ShardId);
+
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("current", current)("event", "DeliveryProblem");
 
         if (RetryWriteRequest(true)) {
             return;
@@ -172,22 +187,26 @@ namespace NKikimr::NEvWrite {
     }
 
     void TShardWriter::Die(const NActors::TActorContext& ctx) {
-        if (RetryBySubscription && LastOverloadSeqNo) {
-            SendToTablet(MakeHolder<TEvColumnShard::TEvOverloadUnsubscribe>(LastOverloadSeqNo));
-            LastOverloadSeqNo = 0;
-        }
+        OnFinish();
 
         TBase::Die(ctx);
     }
 
     void TShardWriter::PassAway() {
+        OnFinish();
+
+        TBase::PassAway();
+    }
+
+    void TShardWriter::OnFinish() {
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("current", current)("event", "TShardWriter::OnFinish");
+
         if (RetryBySubscription && LastOverloadSeqNo) {
+            AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("current", current)("event", "Send TEvOverloadUnsubscribe");
             SendToTablet(MakeHolder<TEvColumnShard::TEvOverloadUnsubscribe>(LastOverloadSeqNo));
             LastOverloadSeqNo = 0;
         }
 
         Send(LeaderPipeCache, new TEvPipeCache::TEvUnlink(0));
-
-        TBase::PassAway();
     }
 }

@@ -198,6 +198,10 @@ namespace NActors {
 
         TActorId recipient = ev->GetRecipientRewrite();
         const ui32 recpNodeId = recipient.NodeId();
+        bool is_overload_event = ev->is_overload;
+        if (is_overload_event) {
+            AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "GenericSend")("recipient", recipient)("line", __LINE__);
+        }
 
         if (recpNodeId != NodeId && recpNodeId != 0) {
             // if recipient is not local one - rewrite with forward instruction
@@ -211,11 +215,17 @@ namespace NActors {
             Y_ENSURE(ev->Recipient == recipient,
                 "Event rewrite from " << ev->Recipient << " to " << recipient << " would be lost via interconnect");
             recipient = InterconnectProxy(recpNodeId);
+            if (is_overload_event) {
+                AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "GenericSend")("line", __LINE__);
+            }
             ev->Rewrite(TEvInterconnect::EvForward, recipient);
         }
         if (recipient.IsService()) {
             TActorId target = ServiceMap->LookupLocal(recipient);
             if (!target && IsInterconnectProxyId(recipient) && ProxyWrapperFactory) {
+                if (is_overload_event) {
+                    AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "GenericSend")("recipient", recipient)("line", __LINE__);
+                }
                 const TActorId actorId = ProxyWrapperFactory(const_cast<TActorSystem*>(this),
                     GetInterconnectProxyNode(recipient));
                 with_lock(ProxyCreationLock) {
@@ -227,23 +237,38 @@ namespace NActors {
                     }
                 }
                 if (target != actorId) {
-                    // a race has occured, terminate newly created actor
+                    // a race has occurred, terminate newly created actor
+                    if (is_overload_event) {
+                        AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "GenericSend")("recipient", recipient)("line", __LINE__);
+                    }
                     Send(new IEventHandle(TEvents::TSystem::Poison, 0, actorId, {}, nullptr, 0));
                 }
             }
             recipient = target;
             ev->Rewrite(ev->GetTypeRewrite(), recipient);
+            if (is_overload_event) {
+                AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "GenericSend")("recipient", recipient)("line", __LINE__);
+            }
         }
 
         Y_DEBUG_ABORT_UNLESS(recipient == ev->GetRecipientRewrite());
         const ui32 recpPool = recipient.PoolID();
         if (recipient && recpPool < ExecutorPoolCount) {
             if ((CpuManager->GetExecutorPool(recpPool)->*EPSpecificSend)(ev)) {
+                if (is_overload_event) {
+                    AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "GenericSend")("recipient", recipient)("line", __LINE__);
+                }
                 return true;
             }
         }
         if (ev) {
+            if (is_overload_event) {
+                AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "GenericSend")("recipient", recipient)("line", __LINE__);
+            }
             Send(IEventHandle::ForwardOnNondelivery(ev, TEvents::TEvUndelivered::ReasonActorUnknown));
+        }
+        if (is_overload_event) {
+            AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("event", "GenericSend")("recipient", recipient)("line", __LINE__);
         }
         return false;
     }
