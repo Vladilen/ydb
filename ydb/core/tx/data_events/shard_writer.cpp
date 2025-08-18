@@ -67,7 +67,6 @@ TWritersController::TWritersController(const ui32 writesCount, const NActors::TA
         if (RetryBySubscription) {
             ev->Record.SetOverloadSubscribe(++LastOverloadSeqNo);
         }
-
         AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("current", current)("event", "Sending data")("LeaderPipeCache", LeaderPipeCache)("LastOverloadSeqNo", LastOverloadSeqNo)("ShardId", ShardId);
         SendToTablet(std::move(ev));
     }
@@ -109,7 +108,6 @@ TWritersController::TWritersController(const ui32 writesCount, const NActors::TA
         }
 
         AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("current", current)("event", "TEvWriteResult OK");
-
         if (RetryBySubscription) {
             LastOverloadSeqNo = 0;
         }
@@ -125,10 +123,7 @@ TWritersController::TWritersController(const ui32 writesCount, const NActors::TA
         AFL_VERIFY(record.GetSeqNo() == LastOverloadSeqNo)("event_seq_no", record.GetSeqNo())("last_overload_seq_no", LastOverloadSeqNo);
         AFL_VERIFY(record.GetTabletID() == ShardId)("ev_tablet_id", record.GetTabletID())("shard_id", ShardId);
 
-        AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("current", current)("event", "Send data again");
-
         if (!RetryWriteRequest(false)) {
-            AFL_WARN(NKikimrServices::TX_COLUMNSHARD_WRITE)("current", current)("event", "Send data again FAILED");
             auto gPassAway = PassAwayGuard();
             const TString errMsg = TStringBuilder() << "Shard " << ShardId << " is still overloaded after " << NumRetries << " retries";
             ExternalController->OnFail(Ydb::StatusIds::OVERLOADED, errMsg);
