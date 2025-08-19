@@ -67,14 +67,14 @@ public:
         Borders.emplace_back(TBorder::First(bounds.GetFirst()));
         Borders.emplace_back(TBorder::Last(bounds.GetLast()));
 
-        auto start = std::chrono::steady_clock::now();
+        // auto start = std::chrono::steady_clock::now();
 
         std::sort(Borders.begin(), Borders.end());
         Borders.erase(std::unique(Borders.begin(), Borders.end()), Borders.end());
 
         // clang-format off
-        AFL_WARN(NKikimrServices::TX_COLUMNSHARD_SCAN)("event", "sort_borders")
-            ("time", std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+        // AFL_WARN(NKikimrServices::TX_COLUMNSHARD_SCAN)("event", "sort_borders")
+        //     ("time", std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
         // clang-format on
 
         AFL_VERIFY(NumIntervals());
@@ -99,7 +99,7 @@ public:
 
         auto position = NArrow::NMerger::TRWSortableBatchPosition(data, 0, SortingSchema->field_names(), {}, false);
 
-        auto start = std::chrono::steady_clock::now();
+        // auto start = std::chrono::steady_clock::now();
 
         for (const auto& border : Borders) {
             if (offset == data->GetRecordsCount()) {
@@ -113,8 +113,8 @@ public:
         }
 
         // clang-format off
-        AFL_WARN(NKikimrServices::TX_COLUMNSHARD_SCAN)("event", "split_portion")
-            ("time", std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+        // AFL_WARN(NKikimrServices::TX_COLUMNSHARD_SCAN)("event", "split_portion")
+        //     ("time", std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
         // clang-format on
 
         std::vector<TRowRange> segments;
