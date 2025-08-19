@@ -33,6 +33,7 @@ YQL_LAST_ABI_VERSION()
 SRCS(
     ut_program.cpp
     ut_script.cpp
+    ut_simple_reader.cpp
     helper.cpp
 )
 

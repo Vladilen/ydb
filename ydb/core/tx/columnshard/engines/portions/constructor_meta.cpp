@@ -69,7 +69,8 @@ TPortionMeta TPortionMetaConstructor::Build() {
 }
 
 bool TPortionMetaConstructor::LoadMetadata(
-    const NKikimrTxColumnShard::TIndexPortionMeta& portionMeta, const TIndexInfo& indexInfo, const IBlobGroupSelector& /*groupSelector*/) {
+    const NKikimrTxColumnShard::TIndexPortionMeta& portionMeta, const TIndexInfo& indexInfo,
+    const IBlobGroupSelector& /*groupSelector*/) {
     if (portionMeta.GetTierName()) {
         TierName = portionMeta.GetTierName();
     }
@@ -91,6 +92,32 @@ bool TPortionMetaConstructor::LoadMetadata(
         AFL_VERIFY(portionMeta.HasPrimaryKeyBorders());
         FirstAndLastPK = NArrow::TFirstLastSpecialKeys(portionMeta.GetPrimaryKeyBorders(), indexInfo.GetReplaceKey());
     }
+
+    AFL_VERIFY(portionMeta.HasRecordSnapshotMin());
+    RecordSnapshotMin = TSnapshot(portionMeta.GetRecordSnapshotMin().GetPlanStep(), portionMeta.GetRecordSnapshotMin().GetTxId());
+    AFL_VERIFY(portionMeta.HasRecordSnapshotMax());
+    RecordSnapshotMax = TSnapshot(portionMeta.GetRecordSnapshotMax().GetPlanStep(), portionMeta.GetRecordSnapshotMax().GetTxId());
+    return true;
+}
+
+bool TPortionMetaConstructor::LoadMetadata2(
+    const NKikimrTxColumnShard::TIndexPortionMeta& portionMeta,
+    const NArrow::TFirstLastSpecialKeys& falpk) {
+    if (portionMeta.GetTierName()) {
+        TierName = portionMeta.GetTierName();
+    }
+    if (portionMeta.HasDeletionsCount()) {
+        DeletionsCount = portionMeta.GetDeletionsCount();
+    } else {
+        DeletionsCount = 0;
+    }
+    CompactionLevel = portionMeta.GetCompactionLevel();
+    RecordsCount = TValidator::CheckNotNull(portionMeta.GetRecordsCount());
+    ColumnRawBytes = TValidator::CheckNotNull(portionMeta.GetColumnRawBytes());
+    ColumnBlobBytes = TValidator::CheckNotNull(portionMeta.GetColumnBlobBytes());
+    IndexRawBytes = portionMeta.GetIndexRawBytes();
+    IndexBlobBytes = portionMeta.GetIndexBlobBytes();
+    FirstAndLastPK = falpk;
 
     AFL_VERIFY(portionMeta.HasRecordSnapshotMin());
     RecordSnapshotMin = TSnapshot(portionMeta.GetRecordSnapshotMin().GetPlanStep(), portionMeta.GetRecordSnapshotMin().GetTxId());
