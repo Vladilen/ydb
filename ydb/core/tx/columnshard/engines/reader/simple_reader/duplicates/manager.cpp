@@ -238,7 +238,7 @@ std::vector<TDuplicateManager::TPortionsSlice> TDuplicateManager::FindIntervalBo
 
     // fs << "dataByPortion:" << std::endl;
     THashMap<ui64, NArrow::TFirstLastSpecialKeys> borders;
-    borders.reserve(dataByPortion.size());
+    // borders.reserve(dataByPortion.size());
     for (const auto& [portionId, dt] : dataByPortion) {
         const auto& portion = getPortionVerified(portionId);
         // fs << "Start Id: " << portionId << std::endl;
@@ -257,7 +257,7 @@ std::vector<TDuplicateManager::TPortionsSlice> TDuplicateManager::FindIntervalBo
     auto ts2 = std::chrono::steady_clock::now();
 
     std::vector<TDuplicateManager::TPortionsSlice> slices;
-    slices.reserve(splitter.NumIntervals());
+    // slices.reserve(splitter.NumIntervals());
     for (ui64 i = 0; i < splitter.NumIntervals(); ++i) {
         slices.emplace_back(TPortionsSlice(splitter.GetIntervalFinish(i))).Reserve(dataByPortion.size());
     }

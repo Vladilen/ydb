@@ -302,7 +302,7 @@ def deduce_components_from_args(args, cluster_details):
         result = {item: [] for item in components}
 
     if 'kikimr' in result and len(result['kikimr']) == 0:
-        result['kikimr'] = ['bin', 'cfg']
+        result['kikimr'] = ['cfg']
 
     if 'dynamic_slots' in result:
         result['dynamic_slots'] = ['all']
