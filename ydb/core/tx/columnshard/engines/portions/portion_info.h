@@ -387,10 +387,6 @@ public:
         }
     }
 
-    void SetSchemaVersion(const ui64 version) {
-        SchemaVersion = version;
-    }
-
     ui64 GetSchemaVersionVerified() const {
         AFL_VERIFY(SchemaVersion);
         return SchemaVersion;

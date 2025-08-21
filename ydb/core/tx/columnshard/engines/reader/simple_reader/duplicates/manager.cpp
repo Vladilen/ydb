@@ -216,82 +216,10 @@ public:
 };
 }   // namespace
 
-std::vector<TDuplicateManager::TPortionsSlice> TDuplicateManager::FindIntervalBordersInPortions(
+std::vector<TIntervalBorders::TPortionsSlice> TDuplicateManager::FindIntervalBorders(
     const THashMap<ui64, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion,
-    const std::shared_ptr<TPortionInfo>& mainSource,
-    const THashMap<ui64, std::shared_ptr<TPortionInfo>>& portions) {
-    // static std::atomic_int count = 0;
-
-    // std::fstream fs;
-    // fs.open("/tmp/test/" + std::to_string(count.fetch_add(1)), std::ios::out);
-    // AFL_VERIFY(fs.is_open());
-    // fs << "Context:" << std::endl;
-    // fs << context->DebugString() << std::endl;
-
-    auto getPortionVerified = [&portions](const ui64 portionId) -> const std::shared_ptr<TPortionInfo>& {
-        const auto* portion = portions.FindPtr(portionId);
-        AFL_VERIFY(portion)("portion", portionId);
-        return *portion;
-    };
-
-    auto ts0 = std::chrono::steady_clock::now();
-
-    // fs << "dataByPortion:" << std::endl;
-    THashMap<ui64, NArrow::TFirstLastSpecialKeys> borders;
-    // borders.reserve(dataByPortion.size());
-    for (const auto& [portionId, dt] : dataByPortion) {
-        const auto& portion = getPortionVerified(portionId);
-        // fs << "Start Id: " << portionId << std::endl;
-        // fs << "Info: " << portion->DebugString(true) << std::endl;
-        // fs << "Data: " << dt->DebugString(true) << std::endl;
-        // fs << "End Id: " << portionId << std::endl;
-        borders.emplace(
-            portionId, NArrow::TFirstLastSpecialKeys(portion->IndexKeyStart(), portion->IndexKeyEnd(), portion->IndexKeyStart().GetSchema()));
-    }
-
-    auto ts1 = std::chrono::steady_clock::now();
-
-    TColumnDataSplitter splitter(
-        borders, NArrow::TFirstLastSpecialKeys(mainSource->IndexKeyStart(), mainSource->IndexKeyEnd(), mainSource->IndexKeyStart().GetSchema()));
-
-    auto ts2 = std::chrono::steady_clock::now();
-
-    std::vector<TDuplicateManager::TPortionsSlice> slices;
-    // slices.reserve(splitter.NumIntervals());
-    for (ui64 i = 0; i < splitter.NumIntervals(); ++i) {
-        slices.emplace_back(TPortionsSlice(splitter.GetIntervalFinish(i))).Reserve(dataByPortion.size());
-    }
-
-    auto ts3 = std::chrono::steady_clock::now();
-
-    for (const auto& [id, data] : dataByPortion) {
-        auto intervals = splitter.SplitPortion(data); // Save  id ?
-        AFL_VERIFY(intervals.size() == splitter.NumIntervals());
-        for (ui64 i = 0; i < splitter.NumIntervals(); ++i) {
-            slices[i].AddRange(id, intervals[i]);
-        }
-    }
-
-    auto ts4 = std::chrono::steady_clock::now();
-
-    // clang-format off
-    AFL_WARN(NKikimrServices::TX_COLUMNSHARD_SCAN)("event", "FindIntervalBordersInPortions")
-        ("time_ts1", std::chrono::duration_cast<std::chrono::microseconds>(ts1 - ts0).count())
-        ("time_ts2", std::chrono::duration_cast<std::chrono::microseconds>(ts2 - ts1).count())
-        ("time_ts3", std::chrono::duration_cast<std::chrono::microseconds>(ts3 - ts2).count())
-        ("time_ts4", std::chrono::duration_cast<std::chrono::microseconds>(ts4 - ts3).count());
-    // clang-format on
-
-    // fs.flush();
-    // fs.close();
-
-    return slices;
-}
-
-std::vector<TDuplicateManager::TPortionsSlice> TDuplicateManager::FindIntervalBorders(
-    const THashMap<ui64, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion,
-    const std::shared_ptr<TInternalFilterConstructor>& context) const {
-    return FindIntervalBordersInPortions(dataByPortion, GetPortionVerified(context->GetRequest()->Get()->GetSourceId()), Portions);
+    const std::shared_ptr<TInternalFilterConstructor>& context) {
+    return IntervalBorders.FindForSource(dataByPortion, GetPortionVerified(context->GetRequest()->Get()->GetSourceId()), Portions);
 }
 
 #define LOCAL_LOG_TRACE \
@@ -395,7 +323,7 @@ void TDuplicateManager::Handle(const NPrivate::TEvDuplicateSourceCacheResult::TP
     // clang-format on
 }
 
-bool TDuplicateManager::BuildFilterForSlice(const TPortionsSlice& slice, const std::shared_ptr<TInternalFilterConstructor>& constructor,
+bool TDuplicateManager::BuildFilterForSlice(const TIntervalBorders::TPortionsSlice& slice, const std::shared_ptr<TInternalFilterConstructor>& constructor,
     const std::shared_ptr<NGroupedMemoryManager::TAllocationGuard>& allocationGuard,
     const THashMap<ui64, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion) {
     const TSnapshot& maxVersion = constructor->GetRequest()->Get()->GetMaxVersion();

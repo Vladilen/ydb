@@ -4,7 +4,7 @@
 #include "context.h"
 #include "events.h"
 #include "private_events.h"
-#include "splitter.h"
+#include "interval_borders.h"
 
 #include <ydb/core/tx/columnshard/blobs_reader/actor.h>
 #include <ydb/core/tx/columnshard/counters/duplicate_filtering.h>
@@ -26,39 +26,6 @@ namespace NKikimr::NOlap::NReader::NSimple::NDuplicateFiltering {
 
 class TDuplicateManager: public NActors::TActor<TDuplicateManager> {
     friend class TMergeableInterval;
-
-public:
-    class TPortionsSlice {
-    private:
-        THashMap<ui64, TRowRange> RangeByPortion;
-        TColumnDataSplitter::TBorder IntervalEnd;
-
-    public:
-        TPortionsSlice(const TColumnDataSplitter::TBorder& end)
-            : IntervalEnd(end) {
-        }
-
-        void Reserve(size_t size) {
-            RangeByPortion.reserve(size);
-        }
-
-        void AddRange(const ui64 portion, const TRowRange& range) {
-            if (range.NumRows() == 0) {
-                return;
-            }
-            AFL_VERIFY(RangeByPortion.emplace(portion, range).second);
-        }
-
-        const TRowRange* GetRangeOptional(const ui64 portion) const {
-            return RangeByPortion.FindPtr(portion);
-        }
-        THashMap<ui64, TRowRange> GetRanges() const {
-            return RangeByPortion;
-        }
-        const TColumnDataSplitter::TBorder& GetEnd() const {
-            return IntervalEnd;
-        }
-    };
 
     class TFilterSizeProvider {
     public:
@@ -84,12 +51,7 @@ private:
     TLRUCache<TDuplicateMapInfo, NArrow::TColumnFilter, TNoopDelete, TFilterSizeProvider> FiltersCache;
     THashMap<TDuplicateMapInfo, std::vector<std::shared_ptr<TInternalFilterConstructor>>> BuildingFilters;
     ui64 ExpectedIntersectionCount = 0;
-
-public:
-    static std::vector<TPortionsSlice> FindIntervalBordersInPortions(
-        const THashMap<ui64, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion,
-        const std::shared_ptr<TPortionInfo>& mainSource,
-        const THashMap<ui64, std::shared_ptr<TPortionInfo>>& portions);
+    TIntervalBorders IntervalBorders;
 
 private:
     static TPortionIntervalTree MakeIntervalTree(const std::deque<NSimple::TSourceConstructor>& portions) {
@@ -110,12 +72,12 @@ private:
         return portions;
     }
 
-    bool BuildFilterForSlice(const TPortionsSlice& slice, const std::shared_ptr<TInternalFilterConstructor>& constructor,
+    bool BuildFilterForSlice(const TIntervalBorders::TPortionsSlice& slice, const std::shared_ptr<TInternalFilterConstructor>& constructor,
         const std::shared_ptr<NGroupedMemoryManager::TAllocationGuard>& allocationGuard,
         const THashMap<ui64, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion);
 
-    std::vector<TPortionsSlice> FindIntervalBorders(const THashMap<ui64, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion,
-        const std::shared_ptr<TInternalFilterConstructor>& context) const;
+    std::vector<TIntervalBorders::TPortionsSlice> FindIntervalBorders(const THashMap<ui64, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion,
+        const std::shared_ptr<TInternalFilterConstructor>& context);
 
 private:
     STATEFN(StateMain) {

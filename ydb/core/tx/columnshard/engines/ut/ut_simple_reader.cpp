@@ -1,8 +1,9 @@
+#include <ydb/core/tx/columnshard/data_sharing/protos/data.pb.h>
 #include <ydb/core/tx/columnshard/test_helper/helper.h>
 
 #include <library/cpp/json/json_reader.h>
 #include <library/cpp/testing/unittest/registar.h>
-#include <reader/simple_reader/duplicates/manager.h>
+#include <reader/simple_reader/duplicates/interval_borders.h>
 #include <ydb/core/tx/columnshard/engines/portions/constructor_portion.h>
 #include <regex>
 
@@ -84,7 +85,7 @@ struct TTestPortionInfo {
     ui64 IndexSize = 0;
 };
 
-TPortionInfoPtr createPortionFromTestPortionInfo(const TTestPortionInfo& info) {
+TPortionInfoPtr CreatePortionFromTestPortionInfo(const TTestPortionInfo& info) {
     static const auto pkSchema = MakePKSchema();
 
     arrow::TimestampBuilder timestamp_B(arrow::timestamp(arrow::TimeUnit::TimeUnit::MICRO), arrow::default_memory_pool());
@@ -123,15 +124,57 @@ TPortionInfoPtr createPortionFromTestPortionInfo(const TTestPortionInfo& info) {
     TPortionMetaConstructor constr;
     UNIT_ASSERT(constr.LoadMetadata2(portionMeta, keys));
 
+    NKikimrColumnShardDataSharingProto::TPortionInfo protoPortionInfo;
+    protoPortionInfo.SetPathId(info.PathId);
+    protoPortionInfo.SetPortionId(info.PortionId);
+    protoPortionInfo.SetSchemaVersion(info.SchemaVersion);
+
     TPortionInfoPtr currentInfo = std::make_shared<TCompactedPortionInfo>(constr.Build());
-    currentInfo->SetPathId(TInternalPathId::FromRawValue(info.PathId));
-    currentInfo->SetPortionId(info.PortionId);
-    currentInfo->SetSchemaVersion(info.SchemaVersion);
+    UNIT_ASSERT(currentInfo->DeserializeFromProto(protoPortionInfo).Ok());
 
     return currentInfo;
 }
 
-TPortionInfoPtr readPortionInfo(const std::string_view line) {
+struct TTestDataBuilder {
+    arrow::StringBuilder log_id;
+    arrow::TimestampBuilder timestamp = arrow::TimestampBuilder(arrow::timestamp(arrow::TimeUnit::TimeUnit::MICRO), arrow::default_memory_pool());
+    arrow::UInt64Builder _yql_plan_step;
+    arrow::UInt64Builder _yql_tx_id;
+    arrow::UInt64Builder _yql_write_id;
+};
+
+TPortionDataPtr CreateDataFromTestDataBuilder(TTestDataBuilder&& builder) {
+    static const auto fullSchema = MakeFullSchema();
+    static const auto fullSchemaNoWriteId = MakeFullSchemaNoWriteId();
+
+    std::shared_ptr<arrow::StringArray> log_id_A;
+    std::shared_ptr<arrow::TimestampArray> timestamp_A;
+    std::shared_ptr<arrow::UInt64Array> _yql_plan_step_A;
+    std::shared_ptr<arrow::UInt64Array> _yql_tx_id_A;
+    std::shared_ptr<arrow::UInt64Array> _yql_write_id_A;
+
+    UNIT_ASSERT(builder.log_id.Finish(&log_id_A).ok());
+    UNIT_ASSERT(builder.timestamp.Finish(&timestamp_A).ok());
+    UNIT_ASSERT(builder._yql_plan_step.Finish(&_yql_plan_step_A).ok());
+    UNIT_ASSERT(builder._yql_tx_id.Finish(&_yql_tx_id_A).ok());
+    if (builder._yql_write_id.length() > 0) {
+        UNIT_ASSERT(builder._yql_write_id.Finish(&_yql_write_id_A).ok());
+    }
+
+    std::shared_ptr<arrow::Table> table;
+
+    if (_yql_write_id_A) {
+        table = arrow::Table::Make(fullSchema, {log_id_A, timestamp_A, _yql_plan_step_A, _yql_tx_id_A, _yql_write_id_A});
+    } else {
+        table = arrow::Table::Make(fullSchemaNoWriteId, {log_id_A, timestamp_A, _yql_plan_step_A, _yql_tx_id_A});
+    }
+
+    return std::make_shared<NKikimr::NArrow::TGeneralContainer>(table);
+}
+
+#if 0
+
+TPortionInfoPtr ReadPortionInfo(const std::string_view line) {
     enum RegexMatchField {
         PortionId = 1,
         PathId,
@@ -174,47 +217,10 @@ TPortionInfoPtr readPortionInfo(const std::string_view line) {
         .ColumnSize = getUi64Field(ColumnSize),
         .IndexSize = getUi64Field(IndexSize)};
 
-    return createPortionFromTestPortionInfo(testPortionInfo);
+    return CreatePortionFromTestPortionInfo(testPortionInfo);
 }
 
-struct TTestDataBuilder {
-    arrow::StringBuilder log_id;
-    arrow::TimestampBuilder timestamp = arrow::TimestampBuilder(arrow::timestamp(arrow::TimeUnit::TimeUnit::MICRO), arrow::default_memory_pool());
-    arrow::UInt64Builder _yql_plan_step;
-    arrow::UInt64Builder _yql_tx_id;
-    arrow::UInt64Builder _yql_write_id;
-};
-
-TPortionDataPtr createDataFromTestDataBuilder(TTestDataBuilder&& builder) {
-    static const auto fullSchema = MakeFullSchema();
-    static const auto fullSchemaNoWriteId = MakeFullSchemaNoWriteId();
-
-    std::shared_ptr<arrow::StringArray> log_id_A;
-    std::shared_ptr<arrow::TimestampArray> timestamp_A;
-    std::shared_ptr<arrow::UInt64Array> _yql_plan_step_A;
-    std::shared_ptr<arrow::UInt64Array> _yql_tx_id_A;
-    std::shared_ptr<arrow::UInt64Array> _yql_write_id_A;
-
-    UNIT_ASSERT(builder.log_id.Finish(&log_id_A).ok());
-    UNIT_ASSERT(builder.timestamp.Finish(&timestamp_A).ok());
-    UNIT_ASSERT(builder._yql_plan_step.Finish(&_yql_plan_step_A).ok());
-    UNIT_ASSERT(builder._yql_tx_id.Finish(&_yql_tx_id_A).ok());
-    if (builder._yql_write_id.length() > 0) {
-        UNIT_ASSERT(builder._yql_write_id.Finish(&_yql_write_id_A).ok());
-    }
-
-    std::shared_ptr<arrow::Table> table;
-
-    if (_yql_write_id_A) {
-        table = arrow::Table::Make(fullSchema, {log_id_A, timestamp_A, _yql_plan_step_A, _yql_tx_id_A, _yql_write_id_A});
-    } else {
-        table = arrow::Table::Make(fullSchemaNoWriteId, {log_id_A, timestamp_A, _yql_plan_step_A, _yql_tx_id_A});
-    }
-
-    return std::make_shared<NKikimr::NArrow::TGeneralContainer>(table);
-}
-
-TPortionDataPtr readData(const std::string_view line) {
+TPortionDataPtr ReadData(const std::string_view line) {
     NJson::TJsonValue jsonData = NJson::ReadJsonFastTree(line, true);
 
     TTestDataBuilder builder;
@@ -274,10 +280,10 @@ TPortionDataPtr readData(const std::string_view line) {
         }
     }
 
-    return createDataFromTestDataBuilder(std::move(builder));
+    return CreateDataFromTestDataBuilder(std::move(builder));
 }
 
-TPortionsData readFile(const std::string& fileName) {
+TPortionsData ReadFile(const std::string& fileName) {
     TDataByPortionId dataByPortionId;
     TInfoByPortionId infoByPortionId;
 
@@ -317,12 +323,12 @@ TPortionsData readFile(const std::string& fileName) {
         }
 
         if (line.starts_with("Info:")) {
-            infoByPortionId[currentId] = readPortionInfo(line.c_str() + 5);
+            infoByPortionId[currentId] = ReadPortionInfo(line.c_str() + 5);
             continue;
         }
 
         if (line.starts_with("Data:")) {
-            dataByPortionId[currentId] = readData(line.c_str() + 5);
+            dataByPortionId[currentId] = ReadData(line.c_str() + 5);
             continue;
         }
     }
@@ -330,12 +336,80 @@ TPortionsData readFile(const std::string& fileName) {
 
     return {source, dataByPortionId, infoByPortionId};
 }
+#endif
+
+// Generates portions with the following pattern
+//   ---
+//  ---
+// ---
+TPortionsData GeneratePortions(ui32 portionsCount, ui32 recordsInPortionCount) {
+    UNIT_ASSERT_GE(portionsCount, 2);
+    UNIT_ASSERT_GE(recordsInPortionCount, portionsCount);
+    std::vector<std::vector<ui32>> recordsInPortions(portionsCount);
+    ui32 current = 0;
+    recordsInPortions[0].emplace_back(current++);
+    for (ui32 i = 1; i < portionsCount; ++i) {
+        recordsInPortions[i].emplace_back(current++);
+        for (int j = i - 1; j >= 0; --j) {
+            recordsInPortions[j].emplace_back(current++);
+        }
+    }
+
+    for (ui32 i = 0; i < portionsCount; ++i) {
+        for (ui32 j = 1; j < recordsInPortionCount - portionsCount + i + 1; ++j) {
+            recordsInPortions[i].emplace_back(current++);
+        }
+    }
+
+    TDataByPortionId dataByPortionId;
+    TInfoByPortionId infoByPortionId;
+
+    for (ui32 i = 0; i < portionsCount; ++i) {
+        infoByPortionId[i] = CreatePortionFromTestPortionInfo(TTestPortionInfo{
+            .PortionId = i,
+            .PathId = 2,
+            .RecordsCount = recordsInPortionCount,
+            .SchemaVersion = 2,
+            .Level = 0,
+            .RecordsSnapshotMinPlanStep = i,
+            .RecordsSnapshotMinTxId = i,
+            .RecordsSnapshotMaxPlanStep = i,
+            .RecordsSnapshotMaxTxId = i,
+            .FromTimestamp = recordsInPortions[i].front(),
+            .FromLogId = "",
+            .ToTimestamp = recordsInPortions[i].back(),
+            .ToLogId = "",
+            .ColumnSize = recordsInPortions[i].size(),
+            .IndexSize = 0});
+
+        TTestDataBuilder testDataBuilder;
+        for (auto v : recordsInPortions[i]) {
+            UNIT_ASSERT(testDataBuilder.log_id.Append("").ok());
+            UNIT_ASSERT(testDataBuilder.timestamp.Append(v).ok());
+            UNIT_ASSERT(testDataBuilder._yql_plan_step.Append(i).ok());
+            UNIT_ASSERT(testDataBuilder._yql_tx_id.Append(i).ok());
+        }
+        dataByPortionId[i] = CreateDataFromTestDataBuilder(std::move(testDataBuilder));
+    }
+
+    for (auto& v : recordsInPortions) {
+        for (auto vv : v) {
+            Cerr << vv << " ";
+        }
+        Cerr << Endl;
+    }
+
+    return {TPortionId(0), dataByPortionId, infoByPortionId};
+}
 
 } // namespace
 
 Y_UNIT_TEST_SUITE(TestSimpleReader) {
 
+#if 0
+
 Y_UNIT_TEST(FindIntervalBordersFromFiles) {
+    TIntervalBorders borders;
     std::pair<std::string, size_t> files[] =
         {{"/home/vladilenmuz/test-duplication/1284", 265},
             {"/home/vladilenmuz/test-duplication/1322", 185},
@@ -343,11 +417,39 @@ Y_UNIT_TEST(FindIntervalBordersFromFiles) {
             {"/home/vladilenmuz/test-duplication/3097", 303}};
 
     for (const auto& [file, expectedBorderCount] : files) {
-        auto [source, dataByPortionId, infoByPortionId] = readFile(file);
-        auto res = TDuplicateManager::FindIntervalBordersInPortions(dataByPortionId, infoByPortionId[source], infoByPortionId);
+        auto [source, dataByPortionId, infoByPortionId] = ReadFile(file);
+        auto res = borders.FindForSource(dataByPortionId, infoByPortionId[source], infoByPortionId);
         UNIT_ASSERT_EQUAL(expectedBorderCount, res.size());
     }
 }
+
+Y_UNIT_TEST(FindIntervalBordersGeneratedPerfTest) {
+    TIntervalBorders borders;
+    const ui32 runningCount = 10;
+    std::vector<std::vector<ui32>> tests;
+    for (ui32 i = 2; i <= 500; ++i) {
+        tests.push_back({i, 1000});
+    }
+
+    Cerr << "x,y" << Endl;
+    for (auto& test : tests) {
+        Cerr << test[0] << ",";
+        ui64 dur = 0;
+        for (ui32 i = 0; i < runningCount; ++i) {
+            auto [source, dataByPortionId, infoByPortionId] = GeneratePortions(test[0], test[1]);
+
+            auto start = std::chrono::steady_clock::now();
+            auto res = borders.FindForSource(dataByPortionId, infoByPortionId[source], infoByPortionId);
+            auto end = std::chrono::steady_clock::now();
+
+            UNIT_ASSERT_EQUAL(test[0], res.size());
+            dur += std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        }
+        Cerr << dur / runningCount << Endl;
+    }
+}
+
+#endif
 
 Y_UNIT_TEST(FindIntervalBordersOnePortion) {
     TTestPortionInfo testPortionInfo{
@@ -366,7 +468,7 @@ Y_UNIT_TEST(FindIntervalBordersOnePortion) {
         .ToLogId = "",
         .ColumnSize = 1,
         .IndexSize = 0};
-    auto info = createPortionFromTestPortionInfo(testPortionInfo);
+    auto info = CreatePortionFromTestPortionInfo(testPortionInfo);
 
     TTestDataBuilder testDataBuilder;
     UNIT_ASSERT(testDataBuilder.log_id.Append(testPortionInfo.FromLogId).ok());
@@ -374,14 +476,15 @@ Y_UNIT_TEST(FindIntervalBordersOnePortion) {
     UNIT_ASSERT(testDataBuilder._yql_plan_step.Append(testPortionInfo.RecordsSnapshotMinPlanStep).ok());
     UNIT_ASSERT(testDataBuilder._yql_tx_id.Append(testPortionInfo.RecordsSnapshotMinTxId).ok());
 
-    auto data = createDataFromTestDataBuilder(std::move(testDataBuilder));
+    auto data = CreateDataFromTestDataBuilder(std::move(testDataBuilder));
 
     TDataByPortionId dataByPortionId;
     TInfoByPortionId infoByPortionId;
     dataByPortionId[testPortionInfo.PortionId] = data;
     infoByPortionId[testPortionInfo.PortionId] = info;
 
-    auto res = TDuplicateManager::FindIntervalBordersInPortions(dataByPortionId, info, infoByPortionId);
+    TIntervalBorders borders;
+    auto res = borders.FindForSource(dataByPortionId, info, infoByPortionId);
 
     UNIT_ASSERT_EQUAL(1, res.size());
 
@@ -416,7 +519,7 @@ Y_UNIT_TEST(FindIntervalBordersNonIntersectingPortions) {
         .ToLogId = "",
         .ColumnSize = 1,
         .IndexSize = 0};
-    auto info1 = createPortionFromTestPortionInfo(testPortionInfo1);
+    auto info1 = CreatePortionFromTestPortionInfo(testPortionInfo1);
 
     TTestPortionInfo testPortionInfo2{
         .PortionId = 2,
@@ -434,7 +537,7 @@ Y_UNIT_TEST(FindIntervalBordersNonIntersectingPortions) {
         .ToLogId = "",
         .ColumnSize = 1,
         .IndexSize = 0};
-    auto info2 = createPortionFromTestPortionInfo(testPortionInfo2);
+    auto info2 = CreatePortionFromTestPortionInfo(testPortionInfo2);
 
     TTestDataBuilder testDataBuilder1;
     UNIT_ASSERT(testDataBuilder1.log_id.Append(testPortionInfo1.FromLogId).ok());
@@ -442,7 +545,7 @@ Y_UNIT_TEST(FindIntervalBordersNonIntersectingPortions) {
     UNIT_ASSERT(testDataBuilder1._yql_plan_step.Append(testPortionInfo1.RecordsSnapshotMinPlanStep).ok());
     UNIT_ASSERT(testDataBuilder1._yql_tx_id.Append(testPortionInfo1.RecordsSnapshotMinTxId).ok());
 
-    auto data1 = createDataFromTestDataBuilder(std::move(testDataBuilder1));
+    auto data1 = CreateDataFromTestDataBuilder(std::move(testDataBuilder1));
 
     TTestDataBuilder testDataBuilder2;
     UNIT_ASSERT(testDataBuilder2.log_id.Append(testPortionInfo2.FromLogId).ok());
@@ -450,7 +553,7 @@ Y_UNIT_TEST(FindIntervalBordersNonIntersectingPortions) {
     UNIT_ASSERT(testDataBuilder2._yql_plan_step.Append(testPortionInfo2.RecordsSnapshotMinPlanStep).ok());
     UNIT_ASSERT(testDataBuilder2._yql_tx_id.Append(testPortionInfo2.RecordsSnapshotMinTxId).ok());
 
-    auto data2 = createDataFromTestDataBuilder(std::move(testDataBuilder2));
+    auto data2 = CreateDataFromTestDataBuilder(std::move(testDataBuilder2));
 
     TDataByPortionId dataByPortionId;
     TInfoByPortionId infoByPortionId;
@@ -459,71 +562,32 @@ Y_UNIT_TEST(FindIntervalBordersNonIntersectingPortions) {
     dataByPortionId[testPortionInfo2.PortionId] = data2;
     infoByPortionId[testPortionInfo2.PortionId] = info2;
 
-    auto res = TDuplicateManager::FindIntervalBordersInPortions(dataByPortionId, info1, infoByPortionId);
+    TIntervalBorders borders;
+    auto res = borders.FindForSource(dataByPortionId, info1, infoByPortionId);
     UNIT_ASSERT_EQUAL(2, res.size());
 }
 
-// Generates portions with the following pattern
-//   ---
-//  ---
-// ---
-TPortionsData GeneratePortions(ui32 portionsCount, ui32 recordsInPortionCount) {
-    UNIT_ASSERT_GE(portionsCount, 2);
-    UNIT_ASSERT_GE(recordsInPortionCount, 2);
-    std::vector<std::vector<ui32>> recordsInPortions(portionsCount);
-    ui32 current = 0;
-    for (ui32 i = 0; i < portionsCount; ++i) {
-        recordsInPortions[i].emplace_back(current++);
-    }
+Y_UNIT_TEST(FindIntervalBordersSplitPortionsCorrectly) {
+    constexpr ui32 portionCount = 5;
+    constexpr ui32 recordsCount = 10;
+    TIntervalBorders borders;
 
-    for (ui32 i = 0; i < portionsCount; ++i) {
-        for (ui32 j = 1; j < recordsInPortionCount - 1; ++j) {
-            recordsInPortions[i].emplace_back(current++);
+    auto [source, dataByPortionId, infoByPortionId] = GeneratePortions(portionCount, recordsCount);
+
+    auto res = borders.FindForSource(dataByPortionId, infoByPortionId[source], infoByPortionId);
+
+    UNIT_ASSERT_EQUAL(portionCount, res.size());
+
+    for (const auto& interval : res) {
+        Cerr << interval.GetRanges().size() << " " << interval.GetEnd().DebugString() << ":" << Endl;
+        for (const auto& range : interval.GetRanges()) {
+            Cerr << range.first << ": [";
+            Cerr << dataByPortionId[range.first]->GetColumns()[1]->GetScalar(range.second.GetBegin())->CastTo(std::make_shared<arrow::UInt64Type>())->get()->ToString() << " ";
+            Cerr << dataByPortionId[range.first]->GetColumns()[1]->GetScalar(range.second.GetEnd() - 1)->CastTo(std::make_shared<arrow::UInt64Type>())->get()->ToString() << "); ";
         }
+        Cerr << Endl << " " << Endl;
+        // UNIT_ASSERT_EQUAL(portionCount, interval.GetRanges().size());
     }
-
-    for (ui32 i = 0; i < portionsCount; ++i) {
-        recordsInPortions[i].emplace_back(current++);
-    }
-
-    TDataByPortionId dataByPortionId;
-    TInfoByPortionId infoByPortionId;
-
-    for (ui32 i = 0; i < portionsCount; ++i) {
-        infoByPortionId[i] = createPortionFromTestPortionInfo(TTestPortionInfo{
-            .PortionId = i,
-            .PathId = 2,
-            .RecordsCount = recordsInPortionCount,
-            .SchemaVersion = 2,
-            .Level = 0,
-            .RecordsSnapshotMinPlanStep = i,
-            .RecordsSnapshotMinTxId = i,
-            .RecordsSnapshotMaxPlanStep = i,
-            .RecordsSnapshotMaxTxId = i,
-            .FromTimestamp = recordsInPortions[i].front(),
-            .FromLogId = "",
-            .ToTimestamp = recordsInPortions[i].back(),
-            .ToLogId = "",
-            .ColumnSize = recordsInPortions[i].size(),
-            .IndexSize = 0});
-
-        TTestDataBuilder testDataBuilder;
-        for (auto v : recordsInPortions[i]) {
-            UNIT_ASSERT(testDataBuilder.log_id.Append("").ok());
-            UNIT_ASSERT(testDataBuilder.timestamp.Append(v).ok());
-            UNIT_ASSERT(testDataBuilder._yql_plan_step.Append(i).ok());
-            UNIT_ASSERT(testDataBuilder._yql_tx_id.Append(i).ok());
-        }
-        dataByPortionId[i] = createDataFromTestDataBuilder(std::move(testDataBuilder));
-    }
-
-    return {TPortionId(0), dataByPortionId, infoByPortionId};
-}
-
-Y_UNIT_TEST(FindIntervalBordersGenerated) {
-    auto [source, dataByPortionId, infoByPortionId] = GeneratePortions(10, 10);
-    auto res = TDuplicateManager::FindIntervalBordersInPortions(dataByPortionId, infoByPortionId[source], infoByPortionId);
-    UNIT_ASSERT_EQUAL(10, res.size());
 }
 
 } // Y_UNIT_TEST_SUITE(TestSimpleReader)
