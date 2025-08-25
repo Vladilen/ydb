@@ -284,6 +284,7 @@ def deduce_components_from_args(args, cluster_details):
     result = dict()
     for item in args.components:
         name, val = item.rsplit('=') if '=' in item else (item, None)
+        print("NV:", name, val)
         assert name == 'all' or name in components, \
             "component <%s> not in allowed set of components [%s]" % (name, ", ".join(components))
 
@@ -298,11 +299,13 @@ def deduce_components_from_args(args, cluster_details):
         else:
             result[name] = val
 
+        print("result:", result)
     if 'all' in args.components:
         result = {item: [] for item in components}
 
+    print("RESSSS:", result)
     if 'kikimr' in result and len(result['kikimr']) == 0:
-        result['kikimr'] = ['cfg']
+        result['kikimr'] = ['cfg','bin']
 
     if 'dynamic_slots' in result:
         result['dynamic_slots'] = ['all']

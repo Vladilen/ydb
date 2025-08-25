@@ -305,7 +305,7 @@ class TestLargeS3Import:
             self.validate_tables(self.olap_table_path, self.external_sink_table_path, "validate_export")
 
             # self.cleanup_tables()
-            self.clear_bucket(output_path)
+            # self.clear_bucket(output_path)
             # self.clear_bucket("test_import/s")
 
         self.results.report_finish()

@@ -7,18 +7,16 @@ namespace NKikimr::NOlap::NReader::NSimple::NDuplicateFiltering {
 
 class TIntervalBorders {
 public:
+    using TPortionId = ui64;
+
     class TPortionsSlice {
     private:
-        THashMap<ui64, TRowRange> RangeByPortion;
+        THashMap<TPortionId, TRowRange> RangeByPortion;
         TColumnDataSplitter::TBorder IntervalEnd;
 
     public:
         TPortionsSlice(const TColumnDataSplitter::TBorder& end)
             : IntervalEnd(end) {
-        }
-
-        void Reserve(size_t size) {
-            RangeByPortion.reserve(size);
         }
 
         void AddRange(const ui64 portion, const TRowRange& range) {
@@ -32,7 +30,7 @@ public:
             return RangeByPortion.FindPtr(portion);
         }
 
-        THashMap<ui64, TRowRange> GetRanges() const {
+        const THashMap<ui64, TRowRange>& GetRanges() const {
             return RangeByPortion;
         }
 
@@ -41,10 +39,24 @@ public:
         }
     };
 
-    std::vector<TPortionsSlice> FindForSource(
-        const THashMap<ui64, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion,
+    virtual std::vector<TPortionsSlice> FindForSource(
+        const THashMap<TPortionId, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion,
         const std::shared_ptr<TPortionInfo>& mainSource,
-        const THashMap<ui64, std::shared_ptr<TPortionInfo>>& portions);
+        const THashMap<TPortionId, std::shared_ptr<TPortionInfo>>& portions);
+
+    virtual ~TIntervalBorders() = default;
+};
+
+class TIntervalBordersCached: public TIntervalBorders {
+public:
+    std::vector<TPortionsSlice> FindForSource(
+        const THashMap<TPortionId, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion,
+        const std::shared_ptr<TPortionInfo>& mainSource,
+        const THashMap<TPortionId, std::shared_ptr<TPortionInfo>>& portions) override;
+
+private:
+    std::set<TColumnDataSplitter::TBorder> CachedBorders;
+    THashMap<ui32, std::vector<TRowRange>> CachedRanges;
 };
 
 } // namespace NKikimr::NOlap::NReader::NSimple::NDuplicateFiltering

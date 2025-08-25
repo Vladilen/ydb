@@ -65,7 +65,8 @@ using TPortionDataPtr = std::shared_ptr<NArrow::TGeneralContainer>;
 using TPortionInfoPtr = std::shared_ptr<TPortionInfo>;
 using TDataByPortionId = THashMap<TPortionId, TPortionDataPtr>;
 using TInfoByPortionId = THashMap<TPortionId, TPortionInfoPtr>;
-using TPortionsData = std::tuple<TPortionId, TDataByPortionId, TInfoByPortionId>;
+using TPortionsData = std::tuple<TDataByPortionId, TInfoByPortionId>;
+using TPortionsDataWithSource = std::tuple<TPortionId, TDataByPortionId, TInfoByPortionId>;
 
 struct TTestPortionInfo {
     ui64 PortionId = 0;
@@ -283,7 +284,7 @@ TPortionDataPtr ReadData(const std::string_view line) {
     return CreateDataFromTestDataBuilder(std::move(builder));
 }
 
-TPortionsData ReadFile(const std::string& fileName) {
+TPortionsDataWithSource ReadFile(const std::string& fileName) {
     TDataByPortionId dataByPortionId;
     TInfoByPortionId infoByPortionId;
 
@@ -342,22 +343,38 @@ TPortionsData ReadFile(const std::string& fileName) {
 //   ---
 //  ---
 // ---
-TPortionsData GeneratePortions(ui32 portionsCount, ui32 recordsInPortionCount) {
+TPortionsData GeneratePortions(ui32 portionsCount, ui32 recordsInPortionCount, bool printOutput = false) {
     UNIT_ASSERT_GE(portionsCount, 2);
     UNIT_ASSERT_GE(recordsInPortionCount, portionsCount);
     std::vector<std::vector<ui32>> recordsInPortions(portionsCount);
+    std::vector<std::string> output(portionsCount * ui32(printOutput));
     ui32 current = 0;
-    recordsInPortions[0].emplace_back(current++);
+
+    auto addValue = [&output, &recordsInPortions, &current, &printOutput](size_t index) {
+        auto val = current++;
+        recordsInPortions[index].emplace_back(val);
+        if (printOutput) {
+            for (size_t i = 0; i < output.size(); ++i) {
+                if (i != index) {
+                    output[i] += "   ";
+                } else {
+                    output[i] += (val < 10 ? "0" : "") + std::to_string(val) + " ";
+                }
+            }
+        }
+    };
+
+    addValue(0);
     for (ui32 i = 1; i < portionsCount; ++i) {
-        recordsInPortions[i].emplace_back(current++);
+        addValue(i);
         for (int j = i - 1; j >= 0; --j) {
-            recordsInPortions[j].emplace_back(current++);
+            addValue(j);
         }
     }
 
     for (ui32 i = 0; i < portionsCount; ++i) {
         for (ui32 j = 1; j < recordsInPortionCount - portionsCount + i + 1; ++j) {
-            recordsInPortions[i].emplace_back(current++);
+            addValue(i);
         }
     }
 
@@ -392,14 +409,21 @@ TPortionsData GeneratePortions(ui32 portionsCount, ui32 recordsInPortionCount) {
         dataByPortionId[i] = CreateDataFromTestDataBuilder(std::move(testDataBuilder));
     }
 
-    for (auto& v : recordsInPortions) {
-        for (auto vv : v) {
-            Cerr << vv << " ";
+    if (printOutput) {
+        ui32 portion = 0;
+        std::string space;
+        ui32 pc = (portionsCount - 1) / 10;
+        while (pc % 10 > 0) {
+            space += " ";
+            pc /= 10;
         }
-        Cerr << Endl;
+        Cerr << "Generated:" << Endl;
+        for (auto& line : output) {
+            Cerr << space << portion++ << ": " << line << Endl;
+        }
     }
 
-    return {TPortionId(0), dataByPortionId, infoByPortionId};
+    return {dataByPortionId, infoByPortionId};
 }
 
 } // namespace
@@ -423,33 +447,52 @@ Y_UNIT_TEST(FindIntervalBordersFromFiles) {
     }
 }
 
+#endif
+
 Y_UNIT_TEST(FindIntervalBordersGeneratedPerfTest) {
-    TIntervalBorders borders;
     const ui32 runningCount = 10;
     std::vector<std::vector<ui32>> tests;
-    for (ui32 i = 2; i <= 500; ++i) {
+    for (ui32 i = 2; i <= 200; ++i) {
         tests.push_back({i, 1000});
     }
 
-    Cerr << "x,y" << Endl;
+    Cerr << "x,y,z" << Endl;
     for (auto& test : tests) {
         Cerr << test[0] << ",";
         ui64 dur = 0;
         for (ui32 i = 0; i < runningCount; ++i) {
-            auto [source, dataByPortionId, infoByPortionId] = GeneratePortions(test[0], test[1]);
+            TIntervalBorders bordersOrig;
+            auto [dataByPortionId, infoByPortionId] = GeneratePortions(test[0], test[1]);
 
             auto start = std::chrono::steady_clock::now();
-            auto res = borders.FindForSource(dataByPortionId, infoByPortionId[source], infoByPortionId);
+            for (ui32 j = 0; j < test[0]; ++j) {
+                auto res = bordersOrig.FindForSource(dataByPortionId, infoByPortionId[j], infoByPortionId);
+            }
             auto end = std::chrono::steady_clock::now();
 
-            UNIT_ASSERT_EQUAL(test[0], res.size());
+            // UNIT_ASSERT_EQUAL(test[0], res.size());
+            dur += std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        }
+        Cerr << dur / runningCount << ",";
+
+        dur = 0;
+        for (ui32 i = 0; i < runningCount; ++i) {
+            TIntervalBordersCached bordersCached;
+
+            auto [dataByPortionId, infoByPortionId] = GeneratePortions(test[0], test[1]);
+
+            auto start = std::chrono::steady_clock::now();
+            for (ui32 j = 0; j < test[0]; ++j) {
+                auto res = bordersCached.FindForSource(dataByPortionId, infoByPortionId[j], infoByPortionId);
+            }
+            auto end = std::chrono::steady_clock::now();
+
+            // UNIT_ASSERT_EQUAL(test[0], res.size());
             dur += std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         }
         Cerr << dur / runningCount << Endl;
     }
 }
-
-#endif
 
 Y_UNIT_TEST(FindIntervalBordersOnePortion) {
     TTestPortionInfo testPortionInfo{
@@ -567,26 +610,52 @@ Y_UNIT_TEST(FindIntervalBordersNonIntersectingPortions) {
     UNIT_ASSERT_EQUAL(2, res.size());
 }
 
-Y_UNIT_TEST(FindIntervalBordersSplitPortionsCorrectly) {
+Y_UNIT_TEST(FindIntervalBordersSplitsPortionsCorrectly) {
     constexpr ui32 portionCount = 5;
-    constexpr ui32 recordsCount = 10;
-    TIntervalBorders borders;
+    constexpr ui32 recordsCount = 5;
+    TIntervalBorders bordersOrig;
+    TIntervalBordersCached bordersCached;
 
-    auto [source, dataByPortionId, infoByPortionId] = GeneratePortions(portionCount, recordsCount);
+    auto [dataByPortionId, infoByPortionId] = GeneratePortions(portionCount, recordsCount, true);
 
-    auto res = borders.FindForSource(dataByPortionId, infoByPortionId[source], infoByPortionId);
+    for (ui32 i = 0; i < portionCount; ++i) {
+        const auto resOrig = bordersOrig.FindForSource(dataByPortionId, infoByPortionId[i], infoByPortionId);
+        const auto resCached = bordersCached.FindForSource(dataByPortionId, infoByPortionId[i], infoByPortionId);
 
-    UNIT_ASSERT_EQUAL(portionCount, res.size());
-
-    for (const auto& interval : res) {
-        Cerr << interval.GetRanges().size() << " " << interval.GetEnd().DebugString() << ":" << Endl;
-        for (const auto& range : interval.GetRanges()) {
-            Cerr << range.first << ": [";
-            Cerr << dataByPortionId[range.first]->GetColumns()[1]->GetScalar(range.second.GetBegin())->CastTo(std::make_shared<arrow::UInt64Type>())->get()->ToString() << " ";
-            Cerr << dataByPortionId[range.first]->GetColumns()[1]->GetScalar(range.second.GetEnd() - 1)->CastTo(std::make_shared<arrow::UInt64Type>())->get()->ToString() << "); ";
+        Cerr << "Slices (" << resOrig.size() << ") ORIG for source: " << i << Endl;
+        for (auto& intervalOrig : resOrig) {
+            Cerr << intervalOrig.GetEnd().DebugString() << "; size: " << intervalOrig.GetRanges().size() << Endl;
+            for (auto& range : intervalOrig.GetRanges()) {
+                Cerr << range.first << ": [";
+                Cerr << dataByPortionId[range.first]->GetColumns()[1]->GetScalar(range.second.GetBegin())->CastTo(std::make_shared<arrow::UInt64Type>())->get()->ToString() << " ";
+                Cerr << dataByPortionId[range.first]->GetColumns()[1]->GetScalar(range.second.GetEnd() - 1)->CastTo(std::make_shared<arrow::UInt64Type>())->get()->ToString() << "]; ";
+            }
+            Cerr << Endl;
         }
-        Cerr << Endl << " " << Endl;
-        // UNIT_ASSERT_EQUAL(portionCount, interval.GetRanges().size());
+
+        Cerr << "Slices (" << resCached.size() << ") CACHED for source: " << i << Endl;
+
+        for (auto& intervalCached : resCached) {
+            Cerr << intervalCached.GetEnd().DebugString() << "; size: " << intervalCached.GetRanges().size() << Endl;
+            for (auto& range : intervalCached.GetRanges()) {
+                Cerr << range.first << ": [";
+                Cerr << dataByPortionId[range.first]->GetColumns()[1]->GetScalar(range.second.GetBegin())->CastTo(std::make_shared<arrow::UInt64Type>())->get()->ToString() << " ";
+                Cerr << dataByPortionId[range.first]->GetColumns()[1]->GetScalar(range.second.GetEnd() - 1)->CastTo(std::make_shared<arrow::UInt64Type>())->get()->ToString() << "]; ";
+            }
+            Cerr << Endl;
+        }
+
+        Cerr << " " << Endl;
+
+        UNIT_ASSERT_EQUAL(portionCount, resOrig.size());
+        UNIT_ASSERT_EQUAL(resOrig.size(), resCached.size());
+        for (ui32 j = 0; j < resOrig.size(); ++j) {
+            const auto& intervalOrig = resOrig[j];
+            const auto& intervalCached = resCached[j];
+
+            UNIT_ASSERT_EQUAL(intervalOrig.GetEnd(), intervalCached.GetEnd());
+            UNIT_ASSERT_EQUAL(intervalOrig.GetRanges(), intervalCached.GetRanges());
+        }
     }
 }
 

@@ -22,6 +22,8 @@ public:
         }
 
     public:
+        mutable THashMap<ui64, ui64> Offsets;
+
         static TBorder First(NArrow::TSimpleRow&& key) {
             return TBorder(false, std::move(key));
         }
@@ -53,7 +55,6 @@ public:
     TColumnDataSplitter(const THashMap<ui64, NArrow::TFirstLastSpecialKeys>& sources, const NArrow::TFirstLastSpecialKeys& bounds) {
         AFL_VERIFY(sources.size());
         SortingSchema = sources.begin()->second.GetSchema();
-        // Borders.reserve(sources.size() * 2 + 2);
 
         for (const auto& [id, specials] : sources) {
             AFL_VERIFY(specials.GetSchema()->Equals(SortingSchema))("lhs", specials.GetSchema()->ToString())("rhs", SortingSchema->ToString());
@@ -67,15 +68,8 @@ public:
         Borders.emplace_back(TBorder::First(bounds.GetFirst()));
         Borders.emplace_back(TBorder::Last(bounds.GetLast()));
 
-        // auto start = std::chrono::steady_clock::now();
-
         std::sort(Borders.begin(), Borders.end());
         Borders.erase(std::unique(Borders.begin(), Borders.end()), Borders.end());
-
-        // clang-format off
-        // AFL_WARN(NKikimrServices::TX_COLUMNSHARD_SCAN)("event", "sort_borders")
-        //     ("time", std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
-        // clang-format on
 
         AFL_VERIFY(NumIntervals());
     }
@@ -90,35 +84,40 @@ public:
         return Borders[intervalIdx + 1];
     }
 
-    std::vector<TRowRange> SplitPortion(const std::shared_ptr<NArrow::TGeneralContainer>& data) const {
+    std::vector<TBorder>& GetBorders() {
+        return Borders;
+    }
+
+    mutable int hits = 0;
+    mutable int misses = 0;
+
+    std::vector<TRowRange> SplitPortion(const std::shared_ptr<NArrow::TGeneralContainer>& data, ui64 portionId) const {
         AFL_VERIFY(!Borders.empty());
 
         std::vector<ui64> borderOffsets;
-        // borderOffsets.reserve(Borders.size());
         ui64 offset = 0;
-
         auto position = NArrow::NMerger::TRWSortableBatchPosition(data, 0, SortingSchema->field_names(), {}, false);
-
-        // auto start = std::chrono::steady_clock::now();
 
         for (const auto& border : Borders) {
             if (offset == data->GetRecordsCount()) {
                 borderOffsets.emplace_back(offset);
+                border.Offsets[portionId] = offset;
                 continue;
             }
-            const auto findBound = NArrow::NMerger::TSortableBatchPosition::FindBound(
-                position, offset, data->GetRecordsCount() - 1, border.GetKey(), border.GetIsLast());
-            offset = findBound ? findBound->GetPosition() : data->GetRecordsCount();
+            if (auto cachedOffset = border.Offsets.FindPtr(portionId)) {
+                offset = *cachedOffset;
+                ++hits;
+            } else {
+                const auto findBound = NArrow::NMerger::TSortableBatchPosition::FindBound(
+                    position, offset, data->GetRecordsCount() - 1, border.GetKey(), border.GetIsLast());
+                offset = findBound ? findBound->GetPosition() : data->GetRecordsCount();
+                ++misses;
+            }
             borderOffsets.emplace_back(offset);
+            border.Offsets[portionId] = offset;
         }
 
-        // clang-format off
-        // AFL_WARN(NKikimrServices::TX_COLUMNSHARD_SCAN)("event", "split_portion")
-        //     ("time", std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
-        // clang-format on
-
         std::vector<TRowRange> segments;
-        // segments.reserve(NumIntervals());
         for (ui64 i = 1; i < borderOffsets.size(); ++i) {
             segments.emplace_back(TRowRange(borderOffsets[i - 1], borderOffsets[i]));
         }

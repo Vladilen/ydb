@@ -43,7 +43,7 @@ std::vector<TIntervalBorders::TPortionsSlice> TIntervalBorders::FindForSource(
     }
 
     for (const auto& [id, data] : dataByPortion) {
-        auto intervals = splitter.SplitPortion(data); // Save  id ?
+        auto intervals = splitter.SplitPortion(data, id); // Save  id ?
         AFL_VERIFY(intervals.size() == splitter.NumIntervals());
         for (ui64 i = 0; i < splitter.NumIntervals(); ++i) {
             slices[i].AddRange(id, intervals[i]);
@@ -52,6 +52,47 @@ std::vector<TIntervalBorders::TPortionsSlice> TIntervalBorders::FindForSource(
 
     // fs.flush();
     // fs.close();
+
+    return slices;
+}
+
+std::vector<TIntervalBorders::TPortionsSlice> TIntervalBordersCached::FindForSource(
+    const THashMap<ui64, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion,
+    const std::shared_ptr<TPortionInfo>& mainSource,
+    const THashMap<ui64, std::shared_ptr<TPortionInfo>>& portions) {
+    THashMap<ui64, NArrow::TFirstLastSpecialKeys> borders;
+    for (const auto& [portionId, portion] : portions) {
+        borders.emplace(
+            portionId, NArrow::TFirstLastSpecialKeys(portion->IndexKeyStart(), portion->IndexKeyEnd(), portion->IndexKeyStart().GetSchema()));
+    }
+
+    TColumnDataSplitter splitter(
+        borders, NArrow::TFirstLastSpecialKeys(mainSource->IndexKeyStart(), mainSource->IndexKeyEnd(), mainSource->IndexKeyStart().GetSchema()));
+    auto& bordersWithCaches = splitter.GetBorders();
+    for (auto& border : bordersWithCaches) {
+        if (auto foundCached = CachedBorders.find(border); foundCached != CachedBorders.end()) {
+            border = *foundCached;
+        }
+    }
+
+    std::vector<TIntervalBorders::TPortionsSlice> slices;
+    for (ui64 i = 0; i < splitter.NumIntervals(); ++i) {
+        slices.emplace_back(TPortionsSlice(splitter.GetIntervalFinish(i)));
+    }
+
+    for (const auto& [id, data] : dataByPortion) {
+        auto intervals = splitter.SplitPortion(data, id);
+        AFL_VERIFY(intervals.size() == splitter.NumIntervals());
+        for (ui64 i = 0; i < splitter.NumIntervals(); ++i) {
+            slices[i].AddRange(id, intervals[i]);
+        }
+    }
+
+    for (auto& border : bordersWithCaches) {
+        CachedBorders.emplace(border);
+    }
+
+    // Cerr << "Hits: " << splitter.hits << "; Misses: " << splitter.misses << Endl;
 
     return slices;
 }
