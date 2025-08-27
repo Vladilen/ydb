@@ -317,21 +317,22 @@ void TDuplicateManager::Handle(const NPrivate::TEvDuplicateSourceCacheResult::TP
     auto allocationGuard = ev->Get()->ExtractAllocationGuard();
 
     LOCAL_LOG_TRACE("event", "construct_filters")("context", context->DebugString());
-    auto start = std::chrono::steady_clock::now();
+    // auto start = std::chrono::steady_clock::now();
 
     auto slices = FindIntervalBorders(dataByPortion, context);
-    auto middle = std::chrono::steady_clock::now();
-    int hits = 0;
+    // auto middle = std::chrono::steady_clock::now();
+    // int hits = 0;
     for (const auto& slice : slices) {
-        hits += int(BuildFilterForSlice(slice, context, allocationGuard, dataByPortion));
+        BuildFilterForSlice(slice, context, allocationGuard, dataByPortion);
+        // hits += int(BuildFilterForSlice(slice, context, allocationGuard, dataByPortion));
     }
-    auto end = std::chrono::steady_clock::now();
+    // auto end = std::chrono::steady_clock::now();
     // clang-format off
-    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "construct_filters")
-        ("time", std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count())
-        ("count", slices.size())("dataByPortion.size()", dataByPortion.size())
-        ("hits", hits)("time_find_borders", std::chrono::duration_cast<std::chrono::milliseconds>(middle - start).count());
-    // clang-format on
+    // AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "construct_filters")
+    //     ("time", std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count())
+    //     ("count", slices.size())("dataByPortion.size()", dataByPortion.size())
+    //     ("hits", hits)("time_find_borders", std::chrono::duration_cast<std::chrono::milliseconds>(middle - start).count());
+    // // clang-format on
 }
 
 bool TDuplicateManager::BuildFilterForSlice(const TIntervalBorders::TPortionsSlice& slice, const std::shared_ptr<TInternalFilterConstructor>& constructor,

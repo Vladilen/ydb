@@ -18,6 +18,7 @@ public:
         TBorder(const bool isLast, const NArrow::TSimpleRow& key)
             : IsLast(isLast)
             , Key(NArrow::NMerger::TSortableBatchPosition(key.ToBatch(), 0, false))
+            , Offsets(std::make_shared<THashMap<ui64, ui64>>())
         {
         }
 
