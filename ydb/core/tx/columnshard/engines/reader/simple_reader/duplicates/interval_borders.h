@@ -19,6 +19,10 @@ public:
             : IntervalEnd(end) {
         }
 
+        void Reserve(size_t size) {
+            RangeByPortion.reserve(size);
+        }
+
         void AddRange(const ui64 portion, const TRowRange& range) {
             if (range.NumRows() == 0) {
                 return;
@@ -54,9 +58,13 @@ public:
         const std::shared_ptr<TPortionInfo>& mainSource,
         const THashMap<TPortionId, std::shared_ptr<TPortionInfo>>& portions) override;
 
+    bool IsPortionInCache(const TPortionId& portionId);
+
 private:
-    std::set<TColumnDataSplitter::TBorder> CachedBorders;
-    THashMap<ui32, std::vector<TRowRange>> CachedRanges;
+    using TBorder = TColumnDataSplitter::TBorder;
+
+    std::set<TBorder> CachedBorders;
+    THashSet<TPortionId> CachedPortions;
 };
 
 } // namespace NKikimr::NOlap::NReader::NSimple::NDuplicateFiltering

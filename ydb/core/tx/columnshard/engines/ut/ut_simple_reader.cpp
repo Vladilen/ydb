@@ -450,9 +450,9 @@ Y_UNIT_TEST(FindIntervalBordersFromFiles) {
 #endif
 
 Y_UNIT_TEST(FindIntervalBordersGeneratedPerfTest) {
-    const ui32 runningCount = 10;
+    const ui32 runningCount = 5;
     std::vector<std::vector<ui32>> tests;
-    for (ui32 i = 2; i <= 200; ++i) {
+    for (ui32 i = 2; i <= 150; ++i) {
         tests.push_back({i, 1000});
     }
 
@@ -470,7 +470,6 @@ Y_UNIT_TEST(FindIntervalBordersGeneratedPerfTest) {
             }
             auto end = std::chrono::steady_clock::now();
 
-            // UNIT_ASSERT_EQUAL(test[0], res.size());
             dur += std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         }
         Cerr << dur / runningCount << ",";
@@ -483,11 +482,17 @@ Y_UNIT_TEST(FindIntervalBordersGeneratedPerfTest) {
 
             auto start = std::chrono::steady_clock::now();
             for (ui32 j = 0; j < test[0]; ++j) {
-                auto res = bordersCached.FindForSource(dataByPortionId, infoByPortionId[j], infoByPortionId);
+                auto dataByPortionIdCached = dataByPortionId;
+                for (auto [id, _] : infoByPortionId) {
+                    if (bordersCached.IsPortionInCache(id)) {
+                        dataByPortionIdCached[id].reset();
+                    }
+                }
+
+                auto res = bordersCached.FindForSource(dataByPortionIdCached, infoByPortionId[j], infoByPortionId);
             }
             auto end = std::chrono::steady_clock::now();
 
-            // UNIT_ASSERT_EQUAL(test[0], res.size());
             dur += std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         }
         Cerr << dur / runningCount << Endl;
@@ -619,8 +624,15 @@ Y_UNIT_TEST(FindIntervalBordersSplitsPortionsCorrectly) {
     auto [dataByPortionId, infoByPortionId] = GeneratePortions(portionCount, recordsCount, true);
 
     for (ui32 i = 0; i < portionCount; ++i) {
+        auto dataByPortionIdCached = dataByPortionId;
+        for (auto [id, _] : infoByPortionId) {
+            if (bordersCached.IsPortionInCache(id)) {
+                dataByPortionIdCached[id].reset();
+            }
+        }
+
         const auto resOrig = bordersOrig.FindForSource(dataByPortionId, infoByPortionId[i], infoByPortionId);
-        const auto resCached = bordersCached.FindForSource(dataByPortionId, infoByPortionId[i], infoByPortionId);
+        const auto resCached = bordersCached.FindForSource(dataByPortionIdCached, infoByPortionId[i], infoByPortionId);
 
         Cerr << "Slices (" << resOrig.size() << ") ORIG for source: " << i << Endl;
         for (auto& intervalOrig : resOrig) {

@@ -52,6 +52,8 @@ private:
     THashMap<TDuplicateMapInfo, std::vector<std::shared_ptr<TInternalFilterConstructor>>> BuildingFilters;
     ui64 ExpectedIntersectionCount = 0;
     TIntervalBorders IntervalBorders;
+    TIntervalBordersCached IntervalBordersCached;
+    bool IsCachedIntervalBorders = false;
 
 private:
     static TPortionIntervalTree MakeIntervalTree(const std::deque<NSimple::TSourceConstructor>& portions) {

@@ -8,7 +8,7 @@
 #include <ydb/core/tx/conveyor/usage/service.h>
 #include <ydb/core/tx/limiter/grouped_memory/usage/service.h>
 
-// #include <fstream>
+#include <fstream>
 
 namespace NKikimr::NOlap::NReader::NSimple::NDuplicateFiltering {
 
@@ -219,6 +219,9 @@ public:
 std::vector<TIntervalBorders::TPortionsSlice> TDuplicateManager::FindIntervalBorders(
     const THashMap<ui64, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion,
     const std::shared_ptr<TInternalFilterConstructor>& context) {
+    if (IsCachedIntervalBorders) {
+        return IntervalBordersCached.FindForSource(dataByPortion, GetPortionVerified(context->GetRequest()->Get()->GetSourceId()), Portions);
+    }
     return IntervalBorders.FindForSource(dataByPortion, GetPortionVerified(context->GetRequest()->Get()->GetSourceId()), Portions);
 }
 
@@ -237,6 +240,14 @@ TDuplicateManager::TDuplicateManager(const TSpecialReadContext& context, const s
     , ColumnDataManager(context.GetCommonContext()->GetColumnDataManager())
     , FiltersCache(FILTER_CACHE_SIZE)
 {
+    std::ifstream fs("/tmp/use_cache_intervals");
+    if (fs.is_open()) {
+        std::string line;
+        if (std::getline(fs, line) && line == "1") {
+            IsCachedIntervalBorders = true;
+        }
+    }
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "cached_intervals")("enabled", IsCachedIntervalBorders);
 }
 
 void TDuplicateManager::Handle(const TEvRequestFilter::TPtr& ev) {

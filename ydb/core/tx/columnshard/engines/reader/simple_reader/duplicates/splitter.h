@@ -15,14 +15,14 @@ public:
         YDB_READONLY_DEF(bool, IsLast);
         NArrow::NMerger::TSortableBatchPosition Key;
 
-        TBorder(const bool isLast, const NArrow::TSimpleRow key)
+        TBorder(const bool isLast, const NArrow::TSimpleRow& key)
             : IsLast(isLast)
             , Key(NArrow::NMerger::TSortableBatchPosition(key.ToBatch(), 0, false))
         {
         }
 
     public:
-        mutable THashMap<ui64, ui64> Offsets;
+        std::shared_ptr<THashMap<ui64, ui64>> Offsets;
 
         static TBorder First(NArrow::TSimpleRow&& key) {
             return TBorder(false, std::move(key));
@@ -55,6 +55,7 @@ public:
     TColumnDataSplitter(const THashMap<ui64, NArrow::TFirstLastSpecialKeys>& sources, const NArrow::TFirstLastSpecialKeys& bounds) {
         AFL_VERIFY(sources.size());
         SortingSchema = sources.begin()->second.GetSchema();
+        Borders.reserve(sources.size() * 2 + 2);
 
         for (const auto& [id, specials] : sources) {
             AFL_VERIFY(specials.GetSchema()->Equals(SortingSchema))("lhs", specials.GetSchema()->ToString())("rhs", SortingSchema->ToString());
@@ -91,30 +92,30 @@ public:
     mutable int hits = 0;
     mutable int misses = 0;
 
-    std::vector<TRowRange> SplitPortion(const std::shared_ptr<NArrow::TGeneralContainer>& data, ui64 portionId) const {
+    std::vector<TRowRange> SplitPortion(const std::shared_ptr<NArrow::TGeneralContainer>& data, ui64 portionId, ui64 dataSize) {
         AFL_VERIFY(!Borders.empty());
 
         std::vector<ui64> borderOffsets;
+        borderOffsets.reserve(Borders.size());
         ui64 offset = 0;
-        auto position = NArrow::NMerger::TRWSortableBatchPosition(data, 0, SortingSchema->field_names(), {}, false);
+        auto position = data ? NArrow::NMerger::TRWSortableBatchPosition(data, 0, SortingSchema->field_names(), {}, false) : NArrow::NMerger::TRWSortableBatchPosition{};
 
-        for (const auto& border : Borders) {
-            if (offset == data->GetRecordsCount()) {
-                borderOffsets.emplace_back(offset);
-                border.Offsets[portionId] = offset;
-                continue;
-            }
-            if (auto cachedOffset = border.Offsets.FindPtr(portionId)) {
+        for (auto& border : Borders) {
+            if (auto cachedOffset = border.Offsets->FindPtr(portionId)) {
                 offset = *cachedOffset;
                 ++hits;
+            } else if (offset == dataSize) {
+                (*border.Offsets)[portionId] = offset;
+                ++misses;
             } else {
+                AFL_VERIFY(data);
                 const auto findBound = NArrow::NMerger::TSortableBatchPosition::FindBound(
-                    position, offset, data->GetRecordsCount() - 1, border.GetKey(), border.GetIsLast());
-                offset = findBound ? findBound->GetPosition() : data->GetRecordsCount();
+                    position, offset, dataSize - 1, border.GetKey(), border.GetIsLast());
+                offset = findBound ? findBound->GetPosition() : dataSize;
+                (*border.Offsets)[portionId] = offset;
                 ++misses;
             }
             borderOffsets.emplace_back(offset);
-            border.Offsets[portionId] = offset;
         }
 
         std::vector<TRowRange> segments;
