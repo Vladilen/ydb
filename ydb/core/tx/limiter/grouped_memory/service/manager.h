@@ -23,6 +23,8 @@ private:
     std::map<TProcessMemoryUsage, TProcessMemory*> ProcessesOrdered;
     std::shared_ptr<TStageFeatures> DefaultStage;
     TIdsControl ProcessIds;
+    static std::atomic_int managerIndex;
+    const int currentIndex;
 
     void TryAllocateWaiting();
     void RefreshSignals() const {
@@ -86,7 +88,9 @@ public:
         , Name(name)
         , Signals(signals)
         , OwnerActorId(ownerActorId)
-        , DefaultStage(defaultStage) {
+        , DefaultStage(defaultStage)
+        , currentIndex(managerIndex.fetch_add(1)) {
+        AFL_WARN(NKikimrServices::GROUPED_MEMORY_LIMITER)("event", "manager_created")("name", Name)("index", currentIndex);
     }
 
     void RegisterGroup(const ui64 externalProcessId, const ui64 externalScopeId, const ui64 externalGroupId);

@@ -4,6 +4,8 @@
 
 namespace NKikimr::NOlap::NGroupedMemoryManager {
 
+std::atomic_int TManager::managerIndex = 0;
+
 TProcessMemory* TManager::GetProcessMemoryByExternalIdOptional(const ui64 externalProcessId) {
     auto internalId = ProcessIds.GetInternalIdOptional(externalProcessId);
     if (!internalId) {
@@ -49,6 +51,8 @@ void TManager::AllocationUpdated(const ui64 externalProcessId, const ui64 extern
     RefreshSignals();
 }
 
+static std::atomic_int tryAllocatesCount = 0;
+
 void TManager::TryAllocateWaiting() {
     if (Processes.size()) {
         auto it = Processes.find(ProcessIds.GetMinInternalIdVerified());
@@ -56,8 +60,16 @@ void TManager::TryAllocateWaiting() {
         AFL_VERIFY(it->second.IsPriorityProcess());
         it->second.TryAllocateWaiting(0);
     }
+    int current = tryAllocatesCount.fetch_add(1);
+    int iterations = 0;
+    auto count = Processes.size();
+    int countNews = 0;
+    int allocated = 0;
+    auto start = std::chrono::steady_clock::now();
     for (auto it = ProcessesOrdered.begin(); it != ProcessesOrdered.end();) {
+        ++iterations;
         if (it->second->TryAllocateWaiting(1)) {
+            ++allocated;
             TProcessMemory* process = it->second;
             it = ProcessesOrdered.erase(it);
             auto info = ProcessesOrdered.emplace(process->BuildUsageAddress(), process);
@@ -65,11 +77,15 @@ void TManager::TryAllocateWaiting() {
             auto itNew = info.first;
             if (it == ProcessesOrdered.end() || itNew->first < it->first) {
                 it = itNew;
+                ++countNews;
             }
         } else {
             ++it;
         }
     }
+    auto end = std::chrono::steady_clock::now();
+    AFL_WARN(NKikimrServices::GROUPED_MEMORY_LIMITER)("event", "try_allocate_waiting")("current", current)("currentIndex", currentIndex)("count", count)("allocated", allocated)("countNews", countNews)("iterations", iterations)("time", std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+
     RefreshSignals();
 }
 
@@ -160,6 +176,7 @@ void TManager::UpdateMemoryLimits(const ui64 limit, const std::optional<ui64>& h
     AFL_ENSURE(DefaultStage);
     bool isLimitIncreased = false;
     DefaultStage->UpdateMemoryLimits(limit, hardLimit, isLimitIncreased);
+    AFL_WARN(NKikimrServices::GROUPED_MEMORY_LIMITER)("event", "update_memory_limits")("limit", limit)("hard_limit", hardLimit)("index", currentIndex);
     if (isLimitIncreased) {
         TryAllocateWaiting();
     }
