@@ -99,15 +99,16 @@ class TEvDuplicateSourceCacheResult
 private:
     TConclusion<TDuplicateSourceCacheResult> Result;
     YDB_READONLY_DEF(std::shared_ptr<TInternalFilterConstructor>, Context);
+    YDB_READONLY_DEF(std::shared_ptr<THashSet<ui64>>, SkippedPortions);
     std::shared_ptr<NGroupedMemoryManager::TAllocationGuard> AllocationGuard;
 
 public:
     TEvDuplicateSourceCacheResult(const std::shared_ptr<TInternalFilterConstructor>& context, TDuplicateSourceCacheResult&& data,
-        std::shared_ptr<NGroupedMemoryManager::TAllocationGuard>&& allocationGuard)
+        std::shared_ptr<NGroupedMemoryManager::TAllocationGuard>&& allocationGuard, std::shared_ptr<THashSet<ui64>> skippedPortions)
         : Result(std::move(data))
         , Context(context)
-        , AllocationGuard(std::move(allocationGuard))
-    {
+        , SkippedPortions(std::move(skippedPortions))
+        , AllocationGuard(std::move(allocationGuard)) {
         AFL_VERIFY(!!AllocationGuard);
     }
 

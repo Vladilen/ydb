@@ -48,12 +48,22 @@ private:
     const std::shared_ptr<NDataAccessorControl::IDataAccessorsManager> DataAccessorsManager;
     const std::shared_ptr<NColumnFetching::TColumnDataManager> ColumnDataManager;
 
+    // Добавляем мапу PortionId -> std::vector<NArrow::TColumnFilter>
+    //
+
+    // TODO: хранить в columnFilter ссылку на PortionCache и удаляем при удалении из кеша
+    THashMap<ui64, THashSet<TDuplicateMapInfo>> PortionsCache;
     TLRUCache<TDuplicateMapInfo, NArrow::TColumnFilter, TNoopDelete, TFilterSizeProvider> FiltersCache;
     THashMap<TDuplicateMapInfo, std::vector<std::shared_ptr<TInternalFilterConstructor>>> BuildingFilters;
     ui64 ExpectedIntersectionCount = 0;
     TIntervalBorders IntervalBorders;
     TIntervalBordersCached IntervalBordersCached;
+    TQueue<std::shared_ptr<TInternalFilterConstructor>> RequestsQueue;
+    ui64 InFlightRequests = 0;
+    const ui64 MaxInFlightRequests = 3;
     bool IsCachedIntervalBorders = false;
+    bool IsCachedPortions = false;
+    int ManagerN = 0;
 
 private:
     static TPortionIntervalTree MakeIntervalTree(const std::deque<NSimple::TSourceConstructor>& portions) {
@@ -74,7 +84,7 @@ private:
         return portions;
     }
 
-    bool BuildFilterForSlice(const TIntervalBorders::TPortionsSlice& slice, const std::shared_ptr<TInternalFilterConstructor>& constructor,
+    void BuildFilterForSlice(const TIntervalBorders::TPortionsSlice& slice, const std::shared_ptr<TInternalFilterConstructor>& constructor,
         const std::shared_ptr<NGroupedMemoryManager::TAllocationGuard>& allocationGuard,
         const THashMap<ui64, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion);
 
@@ -101,6 +111,8 @@ private:
     void Handle(const NActors::TEvents::TEvPoison::TPtr&) {
         AbortAndPassAway("aborted by actor system");
     }
+
+    void HandleNextRequest();
 
     void AbortAndPassAway(const TString& reason) {
         for (auto& [_, constructors] : BuildingFilters) {

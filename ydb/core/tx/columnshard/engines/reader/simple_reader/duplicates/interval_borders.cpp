@@ -92,7 +92,7 @@ std::vector<TIntervalBorders::TPortionsSlice> TIntervalBordersCached::FindForSou
 }
 
 bool TIntervalBordersCached::IsPortionInCache(const TPortionId& portionId) {
-    return CachedPortions.contains(portionId); // Todo: save it somehow
+    return CachedPortions.contains(portionId);
 }
 
 } // namespace NKikimr::NOlap::NReader::NSimple::NDuplicateFiltering
