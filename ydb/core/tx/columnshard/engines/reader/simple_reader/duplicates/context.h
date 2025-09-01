@@ -37,7 +37,6 @@ private:
         AFL_VERIFY(IsReady());
         OriginalRequest->Get()->GetSubscriber()->OnFilterReady(std::move(FiltersByRange.begin()->second));
         Done = true;
-        CompleteCallback();
         AFL_VERIFY(IsDone());
     }
 
@@ -100,6 +99,7 @@ public:
     TInternalFilterConstructor(const TEvRequestFilter::TPtr& request, std::function<void()> completeCallback);
 
     ~TInternalFilterConstructor() {
+        CompleteCallback();
         AFL_VERIFY(IsDone() || (OriginalRequest->Get()->GetAbortionFlag() && OriginalRequest->Get()->GetAbortionFlag()->Val()))(
                                                                              "state", DebugString());
     }

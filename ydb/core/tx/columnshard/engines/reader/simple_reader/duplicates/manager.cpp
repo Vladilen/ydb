@@ -261,11 +261,11 @@ TDuplicateManager::TDuplicateManager(const TSpecialReadContext& context, const s
     if (fs_cf.is_open()) {
         std::string line;
         if (std::getline(fs_cf, line) && line == "1") {
-            IsCachedPortions = true;
+            UseCachedPortions = true;
         }
     }
 
-    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "create_duplicate_manager")("IsCachedIntervalBorders", IsCachedIntervalBorders)("IsCachedPortions", IsCachedPortions)("manager", ManagerN);
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "create_duplicate_manager")("IsCachedIntervalBorders", IsCachedIntervalBorders)("UseCachedPortions", UseCachedPortions)("manager", ManagerN);
 }
 
 void TDuplicateManager::HandleNextRequest() {
@@ -273,7 +273,7 @@ void TDuplicateManager::HandleNextRequest() {
         return;
     }
 
-    if (IsCachedPortions) {
+    if (UseCachedPortions) {
         if (InFlightRequests >= MaxInFlightRequests) {
             return;
         }
@@ -286,7 +286,7 @@ void TDuplicateManager::HandleNextRequest() {
 
     auto& request = constructor->GetRequest();
     AFL_VERIFY(request);
-    if (IsCachedPortions) {
+    if (UseCachedPortions) {
         if (auto foundI = PortionsCache.find(request->Get()->GetSourceId()); foundI != PortionsCache.end()) {
             for (auto& b : foundI->second) {
                 if (auto foundF = FiltersCache.Find(b); foundF != FiltersCache.End()) {
@@ -495,7 +495,7 @@ void TDuplicateManager::Handle(const NPrivate::TEvFilterConstructionResult::TPtr
         BuildingFilters.erase(findWaiting);
 
         FiltersCache.Insert(key, filter);
-        if (IsCachedPortions) {
+        if (UseCachedPortions) {
             PortionsCache[key.GetSourceId()].emplace(key);
         }
     }

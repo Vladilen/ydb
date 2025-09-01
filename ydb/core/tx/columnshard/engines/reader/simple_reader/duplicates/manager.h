@@ -52,7 +52,6 @@ private:
     //
 
     // TODO: хранить в columnFilter ссылку на PortionCache и удаляем при удалении из кеша
-    THashMap<ui64, THashSet<TDuplicateMapInfo>> PortionsCache;
     TLRUCache<TDuplicateMapInfo, NArrow::TColumnFilter, TNoopDelete, TFilterSizeProvider> FiltersCache;
     THashMap<TDuplicateMapInfo, std::vector<std::shared_ptr<TInternalFilterConstructor>>> BuildingFilters;
     ui64 ExpectedIntersectionCount = 0;
@@ -60,9 +59,10 @@ private:
     TIntervalBordersCached IntervalBordersCached;
     TQueue<std::shared_ptr<TInternalFilterConstructor>> RequestsQueue;
     ui64 InFlightRequests = 0;
-    const ui64 MaxInFlightRequests = 3;
+    ui64 MaxInFlightRequests = 3;
+    THashMap<ui64, THashSet<TDuplicateMapInfo>> PortionsCache;
     bool IsCachedIntervalBorders = false;
-    bool IsCachedPortions = false;
+    bool UseCachedPortions = false;
     int ManagerN = 0;
 
 private:

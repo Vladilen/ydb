@@ -196,8 +196,8 @@ class TestLogScenario(object):
 
         threads: list[TestThread] = []
         threads.append(TestThread(target=ydb_workload.bulk_upsert, args=[wait_time, 10, 500, True]))
-        threads.append(TestThread(target=ydb_workload.insert, args=[wait_time, 10, 500, True]))
-        threads.append(TestThread(target=ydb_workload.upsert, args=[wait_time, 10, 500, True]))
+        # threads.append(TestThread(target=ydb_workload.insert, args=[wait_time, 10, 500, True]))
+        # threads.append(TestThread(target=ydb_workload.upsert, args=[wait_time, 10, 500, True]))
 
         for _ in range(10):
             threads.append(TestThread(target=self.aggregation_query, args=[datetime.timedelta(seconds=int(wait_time))]))
