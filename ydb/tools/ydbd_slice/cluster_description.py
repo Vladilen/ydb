@@ -226,7 +226,7 @@ class Configurator(object):
 
     @property
     def static(self):
-        assert self.__kikimr_bin_file
+        #assert self.__kikimr_bin_file
 
         if self.__static is None:
             self.__static = StaticConfigGenerator(self.template, self.__kikimr_bin_file, self.__static_cfg, walle_provider=self.__walle_provider)

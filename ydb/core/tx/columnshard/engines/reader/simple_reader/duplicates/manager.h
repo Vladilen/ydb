@@ -4,6 +4,7 @@
 #include "context.h"
 #include "events.h"
 #include "private_events.h"
+#include "interval_borders.h"
 
 #include <ydb/core/tx/columnshard/blobs_reader/actor.h>
 #include <ydb/core/tx/columnshard/counters/duplicate_filtering.h>
@@ -26,9 +27,6 @@ namespace NKikimr::NOlap::NReader::NSimple::NDuplicateFiltering {
 class TDuplicateManager: public NActors::TActor<TDuplicateManager> {
     friend class TMergeableInterval;
 
-private:
-    class TPortionsSlice;
-
     class TFilterSizeProvider {
     public:
         size_t operator()(const NArrow::TColumnFilter& filter) {
@@ -50,9 +48,22 @@ private:
     const std::shared_ptr<NDataAccessorControl::IDataAccessorsManager> DataAccessorsManager;
     const std::shared_ptr<NColumnFetching::TColumnDataManager> ColumnDataManager;
 
+    // Добавляем мапу PortionId -> std::vector<NArrow::TColumnFilter>
+    //
+
+    // TODO: хранить в columnFilter ссылку на PortionCache и удаляем при удалении из кеша
     TLRUCache<TDuplicateMapInfo, NArrow::TColumnFilter, TNoopDelete, TFilterSizeProvider> FiltersCache;
     THashMap<TDuplicateMapInfo, std::vector<std::shared_ptr<TInternalFilterConstructor>>> BuildingFilters;
     ui64 ExpectedIntersectionCount = 0;
+    TIntervalBorders IntervalBorders;
+    TIntervalBordersCached IntervalBordersCached;
+    TQueue<std::shared_ptr<TInternalFilterConstructor>> RequestsQueue;
+    ui64 InFlightRequests = 0;
+    ui64 MaxInFlightRequests = 3;
+    THashMap<ui64, THashSet<TDuplicateMapInfo>> PortionsCache;
+    bool IsCachedIntervalBorders = false;
+    bool UseCachedPortions = false;
+    int ManagerN = 0;
 
 private:
     static TPortionIntervalTree MakeIntervalTree(const std::deque<NSimple::TSourceConstructor>& portions) {
@@ -73,12 +84,12 @@ private:
         return portions;
     }
 
-    void BuildFilterForSlice(const TPortionsSlice& slice, const std::shared_ptr<TInternalFilterConstructor>& constructor,
+    void BuildFilterForSlice(const TIntervalBorders::TPortionsSlice& slice, const std::shared_ptr<TInternalFilterConstructor>& constructor,
         const std::shared_ptr<NGroupedMemoryManager::TAllocationGuard>& allocationGuard,
         const THashMap<ui64, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion);
 
-    std::vector<TPortionsSlice> FindIntervalBorders(const THashMap<ui64, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion,
-        const std::shared_ptr<TInternalFilterConstructor>& context) const;
+    std::vector<TIntervalBorders::TPortionsSlice> FindIntervalBorders(const THashMap<ui64, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion,
+        const std::shared_ptr<TInternalFilterConstructor>& context);
 
 private:
     STATEFN(StateMain) {
@@ -100,6 +111,8 @@ private:
     void Handle(const NActors::TEvents::TEvPoison::TPtr&) {
         AbortAndPassAway("aborted by actor system");
     }
+
+    void HandleNextRequest();
 
     void AbortAndPassAway(const TString& reason) {
         for (auto& [_, constructors] : BuildingFilters) {

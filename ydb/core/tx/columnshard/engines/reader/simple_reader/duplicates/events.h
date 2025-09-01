@@ -39,6 +39,14 @@ public:
     TSnapshot GetMaxVersion() const {
         return MaxVersion;
     }
+
+    const NArrow::TSimpleRow& GetMinPK() const {
+        return MinPK;
+    }
+
+    const NArrow::TSimpleRow& GetMaxPK() const {
+        return MaxPK;
+    }
 };
 
 class TEvFilterConstructionResult

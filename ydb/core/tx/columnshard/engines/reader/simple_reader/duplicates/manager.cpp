@@ -1,5 +1,4 @@
 #include "manager.h"
-#include "splitter.h"
 
 #include <ydb/core/tx/columnshard/column_fetching/cache_policy.h>
 #include <ydb/core/tx/columnshard/engines/reader/simple_reader/duplicates/merge.h>
@@ -8,6 +7,8 @@
 #include <ydb/core/tx/columnshard/engines/reader/simple_reader/iterator/source.h>
 #include <ydb/core/tx/conveyor/usage/service.h>
 #include <ydb/core/tx/limiter/grouped_memory/usage/service.h>
+
+#include <fstream>
 
 namespace NKikimr::NOlap::NReader::NSimple::NDuplicateFiltering {
 
@@ -18,6 +19,7 @@ private:
     YDB_READONLY_DEF(TActorId, Owner);
     YDB_READONLY_DEF(std::shared_ptr<TInternalFilterConstructor>, Context);
     YDB_READONLY_DEF(std::vector<TPortionInfo::TConstPtr>, Portions);
+    YDB_READONLY_DEF(std::shared_ptr<THashSet<ui64>>, SkippedPortions);
     YDB_READONLY_DEF(std::set<ui32>, Columns);
     YDB_READONLY_DEF(std::shared_ptr<NColumnFetching::TColumnDataManager>, ColumnDataManager);
     YDB_READONLY_DEF(std::shared_ptr<NDataAccessorControl::IDataAccessorsManager>, DataAccessorsManager);
@@ -25,18 +27,18 @@ private:
 
 public:
     TColumnFetchingRequest(const TActorId owner, const std::shared_ptr<TInternalFilterConstructor>& context,
-        std::vector<TPortionInfo::TConstPtr>&& portions, const std::set<ui32>& columns,
+        std::vector<TPortionInfo::TConstPtr>&& portions, std::shared_ptr<THashSet<ui64>>&& skippedPortions, const std::set<ui32>& columns,
         const std::shared_ptr<NColumnFetching::TColumnDataManager>& columnDataManager,
         const std::shared_ptr<NDataAccessorControl::IDataAccessorsManager>& dataAccessorsManager,
-        const std::shared_ptr<NGroupedMemoryManager::TAllocationGuard>& insersectionsMemory)
+        const std::shared_ptr<NGroupedMemoryManager::TAllocationGuard>& intersectionsMemory)
         : Owner(owner)
         , Context(context)
         , Portions(std::move(portions))
+        , SkippedPortions(std::move(skippedPortions))
         , Columns(columns)
         , ColumnDataManager(columnDataManager)
         , DataAccessorsManager(dataAccessorsManager)
-        , IntersectionsMemory(insersectionsMemory)
-    {
+        , IntersectionsMemory(intersectionsMemory) {
         AFL_VERIFY(Owner);
         AFL_VERIFY(Context);
         AFL_VERIFY(Portions.size());
@@ -66,7 +68,7 @@ private:
 
         AFL_VERIFY(AllocationGuard);
         TActorContext::AsActorContext().Send(Request.GetOwner(),
-            new NPrivate::TEvDuplicateSourceCacheResult(Request.GetContext(), std::move(objectAddresses), std::move(AllocationGuard)));
+            new NPrivate::TEvDuplicateSourceCacheResult(Request.GetContext(), std::move(objectAddresses), std::move(AllocationGuard), Request.GetSkippedPortions()));
     }
 
     virtual bool DoIsAborted() const override {
@@ -100,8 +102,11 @@ private:
     virtual bool DoOnAllocated(std::shared_ptr<NGroupedMemoryManager::TAllocationGuard>&& guard,
         const std::shared_ptr<NGroupedMemoryManager::IAllocation>& /*allocation*/) override {
         THashSet<TPortionAddress> portionAddresses;
+        const auto& skippedPortions = Request.GetSkippedPortions();
         for (const auto& portion : Request.GetPortions()) {
-            AFL_VERIFY(portionAddresses.emplace(portion->GetAddress()).second);
+            if (!skippedPortions->contains(portion->GetPortionId())) {
+                AFL_VERIFY(portionAddresses.emplace(portion->GetAddress()).second);
+            }
         }
         auto columnDataManager = Request.GetColumnDataManager();
         auto columns = Request.GetColumns();
@@ -173,8 +178,11 @@ private:
         const std::shared_ptr<NGroupedMemoryManager::IAllocation>& /*allocation*/) override {
         std::shared_ptr<TDataAccessorsRequest> request =
             std::make_shared<TDataAccessorsRequest>(NBlobOperations::EConsumer::DUPLICATE_FILTERING);
+        const auto& skippedPortions = Request.GetSkippedPortions();
         for (auto&& portion : Request.GetPortions()) {
-            request->AddPortion(portion);
+            if (!skippedPortions->contains(portion->GetPortionId())) {
+                request->AddPortion(portion);
+            }
         }
         auto dataAccessorsManager = Request.GetDataAccessorsManager();
         request->RegisterSubscriber(std::make_shared<TColumnDataAccessorFetching>(std::move(Request), guard));
@@ -215,64 +223,19 @@ public:
 };
 }   // namespace
 
-class TDuplicateManager::TPortionsSlice {
-private:
-    THashMap<ui64, TRowRange> RangeByPortion;
-    TColumnDataSplitter::TBorder IntervalEnd;
-
-public:
-    TPortionsSlice(const TColumnDataSplitter::TBorder& end)
-        : IntervalEnd(end)
-    {
-    }
-
-    void AddRange(const ui64 portion, const TRowRange& range) {
-        if (range.NumRows() == 0) {
-            return;
-        }
-        AFL_VERIFY(RangeByPortion.emplace(portion, range).second);
-    }
-
-    const TRowRange* GetRangeOptional(const ui64 portion) const {
-        return RangeByPortion.FindPtr(portion);
-    }
-    THashMap<ui64, TRowRange> GetRanges() const {
-        return RangeByPortion;
-    }
-    const TColumnDataSplitter::TBorder& GetEnd() const {
-        return IntervalEnd;
-    }
-};
-
-std::vector<TDuplicateManager::TPortionsSlice> TDuplicateManager::FindIntervalBorders(
+std::vector<TIntervalBorders::TPortionsSlice> TDuplicateManager::FindIntervalBorders(
     const THashMap<ui64, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion,
-    const std::shared_ptr<TInternalFilterConstructor>& context) const {
-    THashMap<ui64, NArrow::TFirstLastSpecialKeys> borders;
-    for (const auto& [portionId, _] : dataByPortion) {
-        const auto& portion = GetPortionVerified(portionId);
-        borders.emplace(
-            portionId, NArrow::TFirstLastSpecialKeys(portion->IndexKeyStart(), portion->IndexKeyEnd(), portion->IndexKeyStart().GetSchema()));
+    const std::shared_ptr<TInternalFilterConstructor>& context) {
+    if (IsCachedIntervalBorders) {
+        return IntervalBordersCached.FindForSource(dataByPortion, GetPortionVerified(context->GetRequest()->Get()->GetSourceId()), Portions);
     }
-    const auto& mainSource = GetPortionVerified(context->GetRequest()->Get()->GetSourceId());
-    TColumnDataSplitter splitter(
-        borders, NArrow::TFirstLastSpecialKeys(mainSource->IndexKeyStart(), mainSource->IndexKeyEnd(), mainSource->IndexKeyStart().GetSchema()));
-
-    std::vector<TDuplicateManager::TPortionsSlice> slices;
-    for (ui64 i = 0; i < splitter.NumIntervals(); ++i) {
-        slices.emplace_back(TPortionsSlice(splitter.GetIntervalFinish(i)));
-    }
-    for (const auto& [id, data] : dataByPortion) {
-        auto intervals = splitter.SplitPortion(data);
-        AFL_VERIFY(intervals.size() == splitter.NumIntervals());
-        for (ui64 i = 0; i < splitter.NumIntervals(); ++i) {
-            slices[i].AddRange(id, intervals[i]);
-        }
-    }
-    return slices;
+    return IntervalBorders.FindForSource(dataByPortion, GetPortionVerified(context->GetRequest()->Get()->GetSourceId()), Portions);
 }
 
 #define LOCAL_LOG_TRACE \
     AFL_TRACE(NKikimrServices::TX_COLUMNSHARD_SCAN)("component", "duplicates_manager")("self", TActivationContext::AsActorContext().SelfID)
+
+static std::atomic_int managerN = 0;
 
 TDuplicateManager::TDuplicateManager(const TSpecialReadContext& context, const std::deque<NSimple::TSourceConstructor>& portions)
     : TActor(&TDuplicateManager::StateMain)
@@ -286,14 +249,76 @@ TDuplicateManager::TDuplicateManager(const TSpecialReadContext& context, const s
     , ColumnDataManager(context.GetCommonContext()->GetColumnDataManager())
     , FiltersCache(FILTER_CACHE_SIZE)
 {
+    ManagerN = managerN.fetch_add(1);
+    std::ifstream fs_ci("/tmp/use_cache_intervals");
+    if (fs_ci.is_open()) {
+        std::string line;
+        if (std::getline(fs_ci, line) && line == "1") {
+            IsCachedIntervalBorders = true;
+        }
+    }
+    std::ifstream fs_cf("/tmp/use_cache_filters");
+    if (fs_cf.is_open()) {
+        std::string line;
+        if (std::getline(fs_cf, line) && line == "1") {
+            UseCachedPortions = true;
+        }
+    }
+
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "create_duplicate_manager")("IsCachedIntervalBorders", IsCachedIntervalBorders)("UseCachedPortions", UseCachedPortions)("manager", ManagerN);
+}
+
+void TDuplicateManager::HandleNextRequest() {
+    if (RequestsQueue.empty()) {
+        return;
+    }
+
+    if (UseCachedPortions) {
+        if (InFlightRequests >= MaxInFlightRequests) {
+            return;
+        }
+    }
+
+    ++InFlightRequests;
+
+    auto constructor = RequestsQueue.front();
+    RequestsQueue.pop();
+
+    auto& request = constructor->GetRequest();
+    AFL_VERIFY(request);
+    if (UseCachedPortions) {
+        if (auto foundI = PortionsCache.find(request->Get()->GetSourceId()); foundI != PortionsCache.end()) {
+            for (auto& b : foundI->second) {
+                if (auto foundF = FiltersCache.Find(b); foundF != FiltersCache.End()) {
+                    constructor->AddFilter(b, *foundF);
+                }
+            }
+        }
+    }
+    // clang-format off
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "request_filter")
+    ("manager", ManagerN)("min_pk", request->Get()->GetMinPK().DebugString())("max_pk", request->Get()->GetMaxPK().DebugString())
+    ("done", constructor->IsDone());
+    // clang-format on
+    if (constructor->IsDone()) {
+        return;
+    }
+
+    NGroupedMemoryManager::TDeduplicationMemoryLimiterOperator::SendToAllocation(constructor->GetMemoryProcessId(),
+        constructor->GetMemoryScopeId(), constructor->GetMemoryGroupId(),
+        {std::make_shared<TPortionIntersectionsAllocation>(SelfId(), constructor,
+            ExpectedIntersectionCount * sizeof(TPortionInfo::TConstPtr))},
+        (ui64)TInternalFilterConstructor::EFetchingStage::INTERSECTIONS);
 }
 
 void TDuplicateManager::Handle(const TEvRequestFilter::TPtr& ev) {
-    auto constructor = std::make_shared<TInternalFilterConstructor>(ev);
-    NGroupedMemoryManager::TDeduplicationMemoryLimiterOperator::SendToAllocation(constructor->GetMemoryProcessId(),
-        constructor->GetMemoryScopeId(), constructor->GetMemoryGroupId(),
-        { std::make_shared<TPortionIntersectionsAllocation>(SelfId(), constructor,
-            ExpectedIntersectionCount * sizeof(TPortionInfo::TConstPtr)) }, (ui64)TInternalFilterConstructor::EFetchingStage::INTERSECTIONS);
+    auto constructor = std::make_shared<TInternalFilterConstructor>(ev, [this]() {
+        --InFlightRequests;
+        HandleNextRequest();
+    });
+    RequestsQueue.push(constructor);
+
+    HandleNextRequest();
 }
 
 void TDuplicateManager::Handle(const NPrivate::TEvFilterRequestResourcesAllocated::TPtr& ev) {
@@ -327,13 +352,24 @@ void TDuplicateManager::Handle(const NPrivate::TEvFilterRequestResourcesAllocate
         return;
     }
 
+    auto skippedPortions = std::make_shared<THashSet<ui64>>();
+    if (IsCachedIntervalBorders) {
+        for (auto& source : sourcesToFetch) {
+            if (IntervalBordersCached.IsPortionInCache(source->GetPortionId())) {
+                skippedPortions->emplace(source->GetPortionId());
+            }
+        }
+    }
+
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "TEvFilterRequestResourcesAllocated")("skipped", skippedPortions->size())("total", sourcesToFetch.size());
+
     std::set<ui32> columns;
     for (const auto& [columnId, _] : GetFetchingColumns()) {
         columns.emplace(columnId);
     }
 
     TColumnFetchingRequest columnFetchingRequest(
-        SelfId(), constructor, std::move(sourcesToFetch), columns, ColumnDataManager, DataAccessorsManager, memoryGuard);
+        SelfId(), constructor, std::move(sourcesToFetch), std::move(skippedPortions), columns, ColumnDataManager, DataAccessorsManager, memoryGuard);
     const ui64 mem = TColumnDataAccessorFetching::GetRequiredMemory(columnFetchingRequest, LastSchema);
     NGroupedMemoryManager::TDeduplicationMemoryLimiterOperator::SendToAllocation(constructor->GetMemoryProcessId(),
         constructor->GetMemoryScopeId(), constructor->GetMemoryGroupId(),
@@ -354,15 +390,40 @@ void TDuplicateManager::Handle(const NPrivate::TEvDuplicateSourceCacheResult::TP
     const std::shared_ptr<TInternalFilterConstructor>& context = ev->Get()->GetContext();
     auto allocationGuard = ev->Get()->ExtractAllocationGuard();
 
-    LOCAL_LOG_TRACE("event", "construct_filters")("context", context->DebugString());
+    // ui32 skipped = 0;
+    for (auto& skippedPortion : *ev->Get()->GetSkippedPortions()) {
+        if (!dataByPortion.contains(skippedPortion)) {
+            dataByPortion.emplace(skippedPortion, nullptr);
+        }
+        // else {
+        //    skipped++;
+        // }
+    }
 
+    // AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "construct_filters")("skipped", skipped)("total", dataByPortion.size())("skipped_portions", ev->Get()->GetSkippedPortions()->size());
+
+    LOCAL_LOG_TRACE("event", "construct_filters")("context", context->DebugString());
+    // auto start = std::chrono::steady_clock::now();
+
+    // Возможно в таску
     auto slices = FindIntervalBorders(dataByPortion, context);
+    // auto middle = std::chrono::steady_clock::now();
+    // int hits = 0;
     for (const auto& slice : slices) {
         BuildFilterForSlice(slice, context, allocationGuard, dataByPortion);
     }
+    // auto end = std::chrono::steady_clock::now();
+    // clang-format off
+    // AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "construct_filters")
+    //     ("time", std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count())
+    //     ("count", slices.size())("dataByPortion.size()", dataByPortion.size())
+    //     ("hits", hits)("time_find_borders", std::chrono::duration_cast<std::chrono::milliseconds>(middle - start).count());
+    // // clang-format on
+
+    HandleNextRequest();
 }
 
-void TDuplicateManager::BuildFilterForSlice(const TPortionsSlice& slice, const std::shared_ptr<TInternalFilterConstructor>& constructor,
+void TDuplicateManager::BuildFilterForSlice(const TIntervalBorders::TPortionsSlice& slice, const std::shared_ptr<TInternalFilterConstructor>& constructor,
     const std::shared_ptr<NGroupedMemoryManager::TAllocationGuard>& allocationGuard,
     const THashMap<ui64, std::shared_ptr<NArrow::TGeneralContainer>>& dataByPortion) {
     const TSnapshot& maxVersion = constructor->GetRequest()->Get()->GetMaxVersion();
@@ -436,7 +497,12 @@ void TDuplicateManager::Handle(const NPrivate::TEvFilterConstructionResult::TPtr
         BuildingFilters.erase(findWaiting);
 
         FiltersCache.Insert(key, filter);
+        if (UseCachedPortions) {
+            PortionsCache[key.GetSourceId()].emplace(key);
+        }
     }
+
+    HandleNextRequest();
 }
 
 }   // namespace NKikimr::NOlap::NReader::NSimple::NDuplicateFiltering

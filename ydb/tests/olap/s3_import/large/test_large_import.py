@@ -101,7 +101,7 @@ class TestLargeS3Import:
         assert cls.scale in ["1", "10", "100", "1000"], f"Invalid scale: {cls.scale}"
 
         cls.s3_url = "https://storage.yandexcloud.net"
-        cls.s3_sink_bucket = "olap-exp-private"
+        cls.s3_sink_bucket = "ydb-test-test-2"
         cls.external_source_path = YdbCluster.get_tables_path("tpc_h_s3_parquet_import")
         cls.external_sink_path = YdbCluster.get_tables_path("tpc_h_s3_parquet_export")
         cls.external_table_path = YdbCluster.get_tables_path(f"s{cls.scale}/tpc_h_lineitem_s3_parquet_import")
@@ -304,7 +304,8 @@ class TestLargeS3Import:
             self.run_export_to_s3()
             self.validate_tables(self.olap_table_path, self.external_sink_table_path, "validate_export")
 
-            self.cleanup_tables()
-            self.clear_bucket(output_path)
+            # self.cleanup_tables()
+            # self.clear_bucket(output_path)
+            # self.clear_bucket("test_import/s")
 
         self.results.report_finish()

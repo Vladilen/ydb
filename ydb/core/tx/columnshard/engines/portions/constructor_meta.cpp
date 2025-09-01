@@ -41,12 +41,12 @@ TPortionMetaConstructor::TPortionMetaConstructor(const TPortionMeta& meta) {
 TPortionMeta TPortionMetaConstructor::Build() {
     AFL_VERIFY(FirstAndLastPK);
     TMemoryProfileGuard mGuard1("meta_construct/pk");
-    static TAtomicCounter sumValues = 0;
-    static TAtomicCounter sumValuesMeta = 0;
-    static TAtomicCounter countValues = 0;
-//    FirstAndLastPK->Reallocate();
-    AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD)("memory_size", FirstAndLastPK->GetMemorySize())("data_size", FirstAndLastPK->GetDataSize())(
-        "sum", sumValues.Add(FirstAndLastPK->GetMemorySize()))("count", countValues.Inc());
+    // static TAtomicCounter sumValues = 0;
+    // static TAtomicCounter sumValuesMeta = 0;
+    // static TAtomicCounter countValues = 0;
+    // FirstAndLastPK->Reallocate();
+    // AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD)("memory_size", FirstAndLastPK->GetMemorySize())("data_size", FirstAndLastPK->GetDataSize())(
+    //  "sum", sumValues.Add(FirstAndLastPK->GetMemorySize()))("count", countValues.Inc());
     TMemoryProfileGuard mGuard("meta_construct/others");
     AFL_VERIFY(RecordSnapshotMin);
     AFL_VERIFY(RecordSnapshotMax);
@@ -62,14 +62,15 @@ TPortionMeta TPortionMetaConstructor::Build() {
     result.ColumnBlobBytes = *TValidator::CheckNotNull(ColumnBlobBytes);
     result.IndexRawBytes = *TValidator::CheckNotNull(IndexRawBytes);
     result.IndexBlobBytes = *TValidator::CheckNotNull(IndexBlobBytes);
-    AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD)("memory_size", result.GetMemorySize())("data_size", result.GetDataSize())(
-        "sum", sumValuesMeta.Add(result.GetMemorySize()))("count", countValues.Inc())("size_of_meta", sizeof(TPortionMeta));
+    // AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD)("memory_size", result.GetMemorySize())("data_size", result.GetDataSize())(
+    //     "sum", sumValuesMeta.Add(result.GetMemorySize()))("count", countValues.Inc())("size_of_meta", sizeof(TPortionMeta));
 
     return result;
 }
 
 bool TPortionMetaConstructor::LoadMetadata(
-    const NKikimrTxColumnShard::TIndexPortionMeta& portionMeta, const TIndexInfo& indexInfo, const IBlobGroupSelector& /*groupSelector*/) {
+    const NKikimrTxColumnShard::TIndexPortionMeta& portionMeta, const TIndexInfo& indexInfo,
+    const IBlobGroupSelector& /*groupSelector*/) {
     if (portionMeta.GetTierName()) {
         TierName = portionMeta.GetTierName();
     }
@@ -91,6 +92,32 @@ bool TPortionMetaConstructor::LoadMetadata(
         AFL_VERIFY(portionMeta.HasPrimaryKeyBorders());
         FirstAndLastPK = NArrow::TFirstLastSpecialKeys(portionMeta.GetPrimaryKeyBorders(), indexInfo.GetReplaceKey());
     }
+
+    AFL_VERIFY(portionMeta.HasRecordSnapshotMin());
+    RecordSnapshotMin = TSnapshot(portionMeta.GetRecordSnapshotMin().GetPlanStep(), portionMeta.GetRecordSnapshotMin().GetTxId());
+    AFL_VERIFY(portionMeta.HasRecordSnapshotMax());
+    RecordSnapshotMax = TSnapshot(portionMeta.GetRecordSnapshotMax().GetPlanStep(), portionMeta.GetRecordSnapshotMax().GetTxId());
+    return true;
+}
+
+bool TPortionMetaConstructor::LoadMetadata2(
+    const NKikimrTxColumnShard::TIndexPortionMeta& portionMeta,
+    const NArrow::TFirstLastSpecialKeys& falpk) {
+    if (portionMeta.GetTierName()) {
+        TierName = portionMeta.GetTierName();
+    }
+    if (portionMeta.HasDeletionsCount()) {
+        DeletionsCount = portionMeta.GetDeletionsCount();
+    } else {
+        DeletionsCount = 0;
+    }
+    CompactionLevel = portionMeta.GetCompactionLevel();
+    RecordsCount = TValidator::CheckNotNull(portionMeta.GetRecordsCount());
+    ColumnRawBytes = TValidator::CheckNotNull(portionMeta.GetColumnRawBytes());
+    ColumnBlobBytes = TValidator::CheckNotNull(portionMeta.GetColumnBlobBytes());
+    IndexRawBytes = portionMeta.GetIndexRawBytes();
+    IndexBlobBytes = portionMeta.GetIndexBlobBytes();
+    FirstAndLastPK = falpk;
 
     AFL_VERIFY(portionMeta.HasRecordSnapshotMin());
     RecordSnapshotMin = TSnapshot(portionMeta.GetRecordSnapshotMin().GetPlanStep(), portionMeta.GetRecordSnapshotMin().GetTxId());

@@ -8,6 +8,7 @@ SRCS(
     private_events.cpp
     splitter.cpp
     context.cpp
+    interval_borders.cpp
 )
 
 PEERDIR(

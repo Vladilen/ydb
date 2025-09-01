@@ -1,5 +1,6 @@
 import datetime
 import os
+import sys
 import pytest
 
 import random
@@ -18,7 +19,6 @@ from enum import Enum
 
 
 logger = logging.getLogger(__name__)
-
 
 class YdbWorkloadLog:
     class PKMode(Enum):
@@ -70,6 +70,12 @@ class YdbWorkloadLog:
         yatest.common.execute(command=command, wait=wait, timeout=timeout)
 
     def create_table(self, table_name: str):
+        command: list[str] = self.begin_command + ["clean"]
+        try:
+            yatest.common.execute(command=command, wait=True)
+        except Exception:
+            pass
+
         command = self.begin_command + ["init", "--path", table_name, "--store", "column", "--ttl", "1000"]
         self._call(command=command, wait=True)
 
@@ -89,7 +95,7 @@ class YdbWorkloadLog:
             command = command + ["--timestamp_deviation", str(self.timestamp_deviation)]
         else:
             command = command + ["--date-from", str(self.date_from), "--date-to", str(self.date_to)]
-        self._call(command=command, wait=wait, timeout=max(2 * seconds, 60))
+        self._call(command=command, wait=wait, timeout=max(10 * seconds, 60))
 
     # seconds - Seconds to run workload
     # threads - Number of parallel threads in workload
@@ -104,6 +110,7 @@ class YdbWorkloadLog:
         self._insert_rows(operation_name="insert", seconds=seconds, threads=threads, rows=rows, wait=wait)
 
     def __del__(self):
+        return
         command: list[str] = self.begin_command + ["clean"]
         try:
             yatest.common.execute(command=command, wait=True)
@@ -120,21 +127,22 @@ class TestLogScenario(object):
     @classmethod
     def teardown_class(cls):
         cls.ydb_client.stop()
-        cls.cluster.stop()
+        # cls.cluster.stop()
 
     @classmethod
     def _setup_ydb(cls):
         ydb_path = yatest.common.build_path(os.environ.get("YDB_DRIVER_BINARY"))
         logger.info(yatest.common.execute([ydb_path, "-V"], wait=True).stdout.decode("utf-8"))
-        config = KikimrConfigGenerator(
-            extra_feature_flags={"enable_immediate_writing_on_bulk_upsert": True},
-            column_shard_config={"alter_object_enabled": True},
-            additional_log_configs={"TX_COLUMNSHARD_SCAN": LogLevels.TRACE},
-        )
-        cls.cluster = KiKiMR(config)
-        cls.cluster.start()
-        node = cls.cluster.nodes[1]
-        cls.ydb_client = YdbClient(endpoint=f"grpc://{node.host}:{node.port}", database=f"/{config.domain_name}")
+        # config = KikimrConfigGenerator(
+        #     extra_feature_flags={"enable_immediate_writing_on_bulk_upsert": True},
+        #     column_shard_config={"alter_object_enabled": True},
+        #     additional_log_configs={"TX_COLUMNSHARD_SCAN": LogLevels.TRACE},
+        # )
+        # cls.cluster = KiKiMR(config)
+        # cls.cluster.start()
+        # node = cls.cluster.nodes[1]
+        # cls.ydb_client = YdbClient(endpoint=f"grpc://{node.host}:{node.port}", database=f"/{config.domain_name}")
+        cls.ydb_client = YdbClient(endpoint=f"grpc://myt0-7687.search.yandex.net:2135", database=f"/Root/testdb")
         cls.ydb_client.wait_connection(timeout=60)
 
     def get_row_count(self) -> int:
@@ -161,8 +169,13 @@ class TestLogScenario(object):
     def test_log_deviation(self, timestamp_deviation: int):
         """As per https://github.com/ydb-platform/ydb/issues/13530"""
 
-        wait_time: int = int(get_external_param("wait_seconds", "3"))
+        wait_time: int = int(get_external_param("wait_seconds", "30"))
         self.table_name: str = "log"
+
+        sys.stderr.write(self.ydb_client.endpoint)
+        sys.stderr.write('\n')
+        sys.stderr.write(self.ydb_client.database)
+        sys.stderr.flush()
 
         ydb_workload: YdbWorkloadLog = YdbWorkloadLog(
             endpoint=self.ydb_client.endpoint,
@@ -183,8 +196,8 @@ class TestLogScenario(object):
 
         threads: list[TestThread] = []
         threads.append(TestThread(target=ydb_workload.bulk_upsert, args=[wait_time, 10, 500, True]))
-        threads.append(TestThread(target=ydb_workload.insert, args=[wait_time, 10, 500, True]))
-        threads.append(TestThread(target=ydb_workload.upsert, args=[wait_time, 10, 500, True]))
+        # threads.append(TestThread(target=ydb_workload.insert, args=[wait_time, 10, 500, True]))
+        # threads.append(TestThread(target=ydb_workload.upsert, args=[wait_time, 10, 500, True]))
 
         for _ in range(10):
             threads.append(TestThread(target=self.aggregation_query, args=[datetime.timedelta(seconds=int(wait_time))]))

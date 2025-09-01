@@ -60,6 +60,9 @@ public:
 
     [[nodiscard]] bool LoadMetadata(
         const NKikimrTxColumnShard::TIndexPortionMeta& portionMeta, const TIndexInfo& indexInfo, const IBlobGroupSelector& groupSelector);
+    [[nodiscard]] bool LoadMetadata2(
+        const NKikimrTxColumnShard::TIndexPortionMeta& portionMeta,
+        const NArrow::TFirstLastSpecialKeys& falpk);
 };
 
 }   // namespace NKikimr::NOlap
