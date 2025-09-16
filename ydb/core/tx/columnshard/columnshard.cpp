@@ -216,7 +216,10 @@ void TColumnShard::Handle(TEvPrivate::TEvReadFinished::TPtr& ev, const TActorCon
     }
 
     auto readMetaBase = InFlightReadsTracker.ExtractInFlightRequest(ev->Get()->RequestCookie, index, TInstant::Now());
+    readMetaBase->CollapsePkRangesFilter();
     readMetaBase->OnReadFinished(*this);
+
+    // AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "!!!ReadFinished");
 
     ui64 txId = ev->Get()->TxId;
     if (ScanTxInFlight.contains(txId)) {

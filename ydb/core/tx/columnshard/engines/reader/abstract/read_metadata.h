@@ -48,7 +48,10 @@ protected:
     EDeduplicationPolicy DeduplicationPolicy = EDeduplicationPolicy::ALLOW_DUPLICATES;
 
 public:
+    using TPtr = std::shared_ptr<TReadMetadataBase>;
     using TConstPtr = std::shared_ptr<const TReadMetadataBase>;
+
+    // virtual TPtr Clone() const = 0;
 
     ui64 GetTabletId() const {
         return TabletId;
@@ -133,6 +136,11 @@ public:
                 AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD_SCAN)("filter_limit_not_detected", PKRangesFilter->DebugString());
             }
         }
+    }
+
+    void CollapsePkRangesFilter() const {
+        AFL_VERIFY(PKRangesFilter);
+        PKRangesFilter->Collapse();
     }
 
     const TPKRangesFilter& GetPKRangesFilter() const {

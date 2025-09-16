@@ -29,13 +29,18 @@ NOlap::NReader::TReadMetadataBase::TConstPtr TInFlightReadsTracker::ExtractInFli
 
 void TInFlightReadsTracker::AddToInFlightRequest(
     const ui64 cookie, NOlap::NReader::TReadMetadataBase::TConstPtr readMetaBase, const NOlap::TVersionedIndex* /*index*/) {
+    // auto meta = readMetaBase->Clone();
+    // meta->CollapsePkRangesFilter();
     AFL_VERIFY(RequestsMeta.emplace(cookie, readMetaBase).second);
+    // auto cur_req = TotalRequestsMeta.fetch_add(1);
+    // AFL_WARN(NKikimrServices::TX_COLUMNSHARD)
+    // ("event", "AddToInFlightRequest")("current", CurrentNum)("requests", cur_req)("size", readMetaBase->GetPKRangesFilterPtr() ? readMetaBase->GetPKRangesFilterPtr()->Size() : 0);
 
-    auto readMeta = std::dynamic_pointer_cast<const NOlap::NReader::NPlain::TReadMetadata>(readMetaBase);
+    // auto readMeta = std::dynamic_pointer_cast<const NOlap::NReader::NPlain::TReadMetadata>(readMetaBase);
 
-    if (!readMeta) {
-        return;
-    }
+    // if (!readMeta) {
+    //     return;
+    // }
 }
 
 namespace {

@@ -25,7 +25,6 @@ private:
     virtual TString DoDebugString() const = 0;
     bool InitCursorFlag = false;
     virtual void DoFillReadStats(TReadStats& /*stats*/) const {
-    
     }
 
 public:

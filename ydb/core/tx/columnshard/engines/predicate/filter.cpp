@@ -19,6 +19,18 @@ NKikimr::NArrow::TColumnFilter TPKRangesFilter::BuildFilter(const std::shared_pt
     return result;
 }
 
+void TPKRangesFilter::Collapse() {
+    if (FakeRanges) {
+        return;
+    }
+
+    auto filter = TPKRangeFilter::Build(TPredicateContainer(SortedRanges.front().GetPredicateFrom()), TPredicateContainer(SortedRanges.back().GetPredicateTo()));
+    AFL_VERIFY(filter.IsSuccess());
+
+    SortedRanges.clear();
+    SortedRanges.emplace_back(filter.DetachResult());
+}
+
 TConclusionStatus TPKRangesFilter::Add(
     std::shared_ptr<NOlap::TPredicate> f, std::shared_ptr<NOlap::TPredicate> t, const std::shared_ptr<arrow::Schema>& pkSchema) {
     if ((!f || f->Empty()) && (!t || t->Empty())) {
@@ -102,10 +114,16 @@ TPKRangeFilter::EUsageClass TPKRangesFilter::GetUsageClass(const NArrow::TSimple
     return TPKRangeFilter::EUsageClass::NoUsage;
 }
 
-TPKRangesFilter::TPKRangesFilter() {
+TPKRangesFilter::TPKRangesFilter()
+    : FilterNum(NextFilterNum.fetch_add(1)) {
+    // AFL_WARN(NKikimrServices::TX_COLUMNSHARD_SCAN)("event", "TPKRangesFilter-created")("filter_num", FilterNum);
     auto range = TPKRangeFilter::Build(TPredicateContainer::BuildNullPredicateFrom(), TPredicateContainer::BuildNullPredicateTo());
     Y_ABORT_UNLESS(range);
     SortedRanges.emplace_back(*range);
+}
+
+TPKRangesFilter::~TPKRangesFilter() {
+    // AFL_WARN(NKikimrServices::TX_COLUMNSHARD_SCAN)("event", "TPKRangesFilter-destroyed")("filter_num", FilterNum);
 }
 
 std::shared_ptr<arrow::RecordBatch> TPKRangesFilter::SerializeToRecordBatch(const std::shared_ptr<arrow::Schema>& pkSchema) const {

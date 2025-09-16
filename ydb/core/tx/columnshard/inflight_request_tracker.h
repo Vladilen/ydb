@@ -91,6 +91,9 @@ private:
     ui64 NextCookie = 1;
     THashMap<ui64, NOlap::NReader::TReadMetadataBase::TConstPtr> RequestsMeta;
     NOlap::TSelectInfo::TStats SelectStatsDelta;
+    static inline std::atomic_uint64_t NextNum = 1;
+    uint64_t CurrentNum = 0;
+    static inline std::atomic_uint64_t TotalRequestsMeta = 0;
 
 public:
     std::optional<NOlap::TSnapshot> GetSnapshotToClean() const {
@@ -129,7 +132,8 @@ public:
 
     TInFlightReadsTracker(const std::shared_ptr<NOlap::IStoragesManager>& storagesManager, const std::shared_ptr<TRequestsTracerCounters>& counters)
         : Counters(counters)
-        , StoragesManager(storagesManager) {
+        , StoragesManager(storagesManager)
+        , CurrentNum(NextNum.fetch_add(1)) {
     }
 
 private:

@@ -12,9 +12,12 @@ class TPKRangesFilter {
 private:
     bool FakeRanges = true;
     std::deque<TPKRangeFilter> SortedRanges;
+    static inline std::atomic_uint64_t NextFilterNum = 0;
+    ui64 FilterNum = 0;
 
 public:
     TPKRangesFilter();
+    ~TPKRangesFilter();
 
     std::optional<ui32> GetFilteredCountLimit(const std::shared_ptr<arrow::Schema>& pkSchema) {
         ui32 result = 0;
@@ -28,6 +31,8 @@ public:
         return result;
     }
 
+    void Collapse();
+
     [[nodiscard]] TConclusionStatus Add(
         std::shared_ptr<NOlap::TPredicate> f, std::shared_ptr<NOlap::TPredicate> t, const std::shared_ptr<arrow::Schema>& pkSchema);
     std::shared_ptr<arrow::RecordBatch> SerializeToRecordBatch(const std::shared_ptr<arrow::Schema>& pkSchema) const;
@@ -40,6 +45,11 @@ public:
     const TPKRangeFilter& Front() const {
         Y_ABORT_UNLESS(Size());
         return SortedRanges.front();
+    }
+
+    const TPKRangeFilter& Back() const {
+        Y_ABORT_UNLESS(Size());
+        return SortedRanges.back();
     }
 
     size_t Size() const {

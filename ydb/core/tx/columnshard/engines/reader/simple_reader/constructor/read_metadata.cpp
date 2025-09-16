@@ -19,4 +19,8 @@ std::shared_ptr<IDataReader> TReadMetadata::BuildReader(const std::shared_ptr<TR
     return std::make_shared<TPlainReadData>(context);
 }
 
+// TReadMetadataBase::TPtr TReadMetadata::Clone() const {
+//     return std::make_shared<TReadMetadata>(*this);
+// }
+
 }   // namespace NKikimr::NOlap::NReader::NSimple
