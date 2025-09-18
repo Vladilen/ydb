@@ -209,7 +209,8 @@ void TColumnShard::Handle(TEvPrivate::TEvScanStats::TPtr& ev, const TActorContex
 void TColumnShard::Handle(TEvPrivate::TEvReadFinished::TPtr& ev, const TActorContext& ctx) {
     Y_UNUSED(ctx);
     ui64 readCookie = ev->Get()->RequestCookie;
-    LOG_S_DEBUG("Finished read cookie: " << readCookie << " at tablet " << TabletID());
+    // LOG_S_DEBUG("Finished read cookie: " << readCookie << " at tablet " << TabletID());
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("Finished read cookie", readCookie)("tablet", TabletID());
     const NOlap::TVersionedIndex* index = nullptr;
     if (HasIndex()) {
         index = &GetIndexAs<NOlap::TColumnEngineForLogs>().GetVersionedIndex();

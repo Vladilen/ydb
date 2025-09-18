@@ -74,12 +74,13 @@ bool TTxBlobsWritingFinished::DoExecute(TTransactionContext& txc, const TActorCo
             auto ev = NEvents::TDataEvents::TEvWriteResult::BuildCompleted(Self->TabletID());
             Results.emplace_back(std::move(ev), writeMeta.GetSource(), operation->GetCookie());
         } else {
-            auto& info = Self->OperationsManager->GetLockVerified(operation->GetLockId());
             NKikimrDataEvents::TLock lock;
             lock.SetLockId(operation->GetLockId());
             lock.SetDataShard(Self->TabletID());
-            lock.SetGeneration(info.GetGeneration());
-            lock.SetCounter(info.GetInternalGenerationCounter());
+            if (auto info = Self->OperationsManager->GetLockOptional(operation->GetLockId()); info) {
+                lock.SetGeneration(info->GetGeneration());
+                lock.SetCounter(info->GetInternalGenerationCounter());
+            }
             writeMeta.GetPathId().SchemeShardLocalPathId.ToProto(lock);
             LWPROBE(EvWriteResult, Self->TabletID(), writeMeta.GetSource().ToString(), 0, operation->GetCookie(), "tx_write", true, "");
             auto ev = NEvents::TDataEvents::TEvWriteResult::BuildCompleted(Self->TabletID(), operation->GetLockId(), lock);

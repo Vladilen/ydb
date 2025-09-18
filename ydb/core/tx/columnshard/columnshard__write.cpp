@@ -136,8 +136,8 @@ void TColumnShard::Handle(TEvPrivate::TEvWriteBlobsResult::TPtr& ev, const TActo
         AFL_VERIFY(!writeMeta.HasLongTxId());
         auto operation = OperationsManager->GetOperationVerified((TOperationWriteId)writeMeta.GetWriteId());
         LWPROBE(EvWriteResult, TabletID(), writeMeta.GetSource().ToString(), 0, operation->GetCookie(), "write_blob_result", false, ev->Get()->GetErrorMessage() ? ev->Get()->GetErrorMessage() : "put data fails");
-        auto result = NEvents::TDataEvents::TEvWriteResult::BuildError(TabletID(), operation->GetLockId(), ev->Get()->GetWriteResultStatus(),
-            ev->Get()->GetErrorMessage() ? ev->Get()->GetErrorMessage() : "put data fails");
+        auto result = NEvents::TDataEvents::TEvWriteResult::BuildError(
+            TabletID(), operation->GetLockId(), ev->Get()->GetWriteResultStatus(), ev->Get()->GetErrorMessage() ? ev->Get()->GetErrorMessage() : "put data fails");
         ctx.Send(writeMeta.GetSource(), result.release(), 0, operation->GetCookie());
         Counters.GetCSCounters().OnFailedWriteResponse(EWriteFailReason::PutBlob);
         wBuffer.RemoveData(aggr, StoragesManager->GetInsertOperator());
@@ -336,6 +336,21 @@ private:
     ui64 Cookie;
 };
 
+void TColumnShard::Handle(NLongTxService::TEvLongTxService::TEvLockStatus::TPtr& ev, const TActorContext& /*ctx*/) {
+    auto* msg = ev->Get();
+    const ui64 lockId = msg->Record.GetLockId();
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "!!!TEvLockStatus")("record", msg->Record.DebugString());
+    switch (msg->Record.GetStatus()) {
+        case NKikimrLongTxService::TEvLockStatus::STATUS_NOT_FOUND:
+        case NKikimrLongTxService::TEvLockStatus::STATUS_UNAVAILABLE:
+            GetOperationsManager().AbortLock(*this, lockId);
+            break;
+
+        default:
+            break;
+    }
+}
+
 void TColumnShard::Handle(NEvents::TDataEvents::TEvWrite::TPtr& ev, const TActorContext& ctx) {
     TMemoryProfileGuard mpg("NEvents::TDataEvents::TEvWrite");
     NActors::TLogContextGuard gLogging =
@@ -344,7 +359,6 @@ void TColumnShard::Handle(NEvents::TDataEvents::TEvWrite::TPtr& ev, const TActor
     const auto& record = ev->Get()->Record;
     const auto source = ev->Sender;
     const auto cookie = ev->Cookie;
-
 
     std::optional<TDuration> writeTimeout;
     if (record.HasTimeoutSeconds()) {
@@ -373,6 +387,7 @@ void TColumnShard::Handle(NEvents::TDataEvents::TEvWrite::TPtr& ev, const TActor
     auto behaviour = *behaviourConclusion;
 
     if (behaviour == EOperationBehaviour::AbortWriteLock) {
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "!!!ABORT IN TColumnShard::Handle");
         LWPROBE(EvWrite, TabletID(), source.ToString(), cookie, record.GetTxId(), writeTimeout.value_or(TDuration::Max()), 0, "AbortWriteLock", true, false, ToString(NKikimrDataEvents::TEvWriteResult::STATUS_UNSPECIFIED), "");
         Execute(new TAbortWriteTransaction(this, record.GetLocks().GetLocks()[0].GetLockId(), source, cookie), ctx);
         return;
@@ -384,6 +399,20 @@ void TColumnShard::Handle(NEvents::TDataEvents::TEvWrite::TPtr& ev, const TActor
         auto result = NEvents::TDataEvents::TEvWriteResult::BuildError(TabletID(), record.GetTxId(), status, message);
         ctx.Send(source, result.release(), 0, cookie);
     };
+
+    const auto inFlightLocksBytes = NOlap::TPKRangeFilter::GetFiltersTotalMemorySize();
+    const ui64 inFlightLocksBytesLimit = AppDataVerified().ColumnShardConfig.GetInFlightLocksBytesLimit();
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "Comparing size")("inFlightLocksBytesLimit", inFlightLocksBytesLimit)("inFlightLocksBytes", inFlightLocksBytes)(
+        "record.GetTxId()", record.GetTxId())("record.GetLockTxId()", record.GetLockTxId())(
+        "record.GetLocks().GetLocks()[0].GetLockId()", record.HasLocks() ? record.GetLocks().GetLocks()[0].GetLockId() : 0)("record.GetLockNodeId()", record.GetLockNodeId())(
+        "OperationsManager->GetLockFeaturesCount()", OperationsManager->GetLockFeaturesCount())("InFlightReadsTracker.GetRequestsCount()", InFlightReadsTracker.GetRequestsCount());
+    if (behaviour == EOperationBehaviour::WriteWithLock && inFlightLocksBytes > inFlightLocksBytesLimit) {
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "!!!OVERLOADED By limit");
+        sendError("overloaded by memory limit", NKikimrDataEvents::TEvWriteResult::STATUS_LOCKS_BROKEN);
+        // Execute(new TAbortWriteTransaction(this, record.GetLockTxId(), source, cookie), ctx);
+        return;
+    }
+
     if (behaviour == EOperationBehaviour::CommitWriteLock) {
         auto commitOperation = std::make_shared<TCommitOperation>(TabletID());
         auto conclusionParse = commitOperation->Parse(*ev->Get());

@@ -188,6 +188,65 @@ Y_UNIT_TEST_SUITE(KqpOlapLocks) {
         }
     }
 
+    Y_UNIT_TEST(TableInsertAsSelectOlapStore) {
+        auto settings = TKikimrSettings().SetWithSampleTables(false);
+        settings.AppConfig.MutableTableServiceConfig()->SetEnableOlapSink(true);
+
+        TKikimrRunner kikimr(settings);
+        Tests::NCommon::TLoggerInit(kikimr).SetComponents({NKikimrServices::TX_COLUMNSHARD_WRITE, NKikimrServices::TX_COLUMNSHARD}, "CS").SetPriority(NActors::NLog::PRI_DEBUG).Initialize();
+
+        TLocalHelper(kikimr).CreateTestOlapTables();
+
+        WriteTestData(kikimr, "/Root/olapStore/olapTable0", 0, 1000000, 3, true);
+
+        auto db = kikimr.GetQueryClient();
+        auto sessionResult = db.GetSession().ExtractValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(sessionResult.GetStatus(), NYdb::EStatus::SUCCESS, sessionResult.GetIssues().ToString());
+        auto session = sessionResult.GetSession();
+        const TString query = "INSERT INTO `/Root/olapStore/olapTable1` SELECT * FROM `/Root/olapStore/olapTable0`";
+        auto result = session.ExecuteQuery(query, NYdb::NQuery::TTxControl::BeginTx()).ExtractValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), NYdb::EStatus::SUCCESS, result.GetIssues().ToString());
+        auto transaction = result.GetTransaction();
+        UNIT_ASSERT(transaction->IsActive());
+        auto txRes = transaction->Rollback().ExtractValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(txRes.GetStatus(), NYdb::EStatus::SUCCESS, txRes.GetIssues().ToString());
+        //
+
+        // {
+        //     const TString query = "UPDATE TwoShard SET Value2 = 0";
+        //     auto result = session.ExecuteQuery(query, TTxControl::BeginTx()).ExtractValueSync();
+        //     UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        //     auto transaction = result.GetTransaction();
+        //     UNIT_ASSERT(transaction->IsActive());
+
+        // auto checkResult = [&](TString expected) {
+        //     auto selectRes = db.ExecuteQuery(
+        //         "SELECT * FROM TwoShard ORDER BY Key",
+        //         TTxControl::BeginTx().CommitTx()
+        //     ).ExtractValueSync();
+
+        // UNIT_ASSERT_C(selectRes.IsSuccess(), selectRes.GetIssues().ToString());
+        // CompareYson(expected, FormatResultSetYson(selectRes.GetResultSet(0)));
+        // };
+        // checkResult(R"([[[1u];["One"];[-1]];[[2u];["Two"];[0]];[[3u];["Three"];[1]];[[4000000001u];["BigOne"];[-1]];[[4000000002u];["BigTwo"];[0]];[[4000000003u];["BigThree"];[1]]])");
+
+        // auto txRes = transaction->Commit().GetValueSync();
+        // UNIT_ASSERT_VALUES_EQUAL_C(txRes.GetStatus(), EStatus::SUCCESS, txRes.GetIssues().ToString());
+
+        // checkResult(R"([[[1u];["One"];[0]];[[2u];["Two"];[0]];[[3u];["Three"];[0]];[[4000000001u];["BigOne"];[0]];[[4000000002u];["BigTwo"];[0]];[[4000000003u];["BigThree"];[0]]])");
+        // // }
+
+        // auto client = kikimr.GetQueryClient();
+        // auto tx = NYdb::NQuery::TTxControl::BeginTx();
+        // auto result = client
+        //                   .ExecuteQuery(R"(
+        //     INSERT INTO `/Root/olapStore/olapTable1` SELECT * FROM `/Root/olapStore/olapTable0`;
+        // )",
+        //                       tx)
+        //                   .ExtractValueSync();
+        // UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
+    }
+
     void TestDeleteAbsent(const size_t shardCount, bool reboot) {
         //This test tries to DELETE from a table when there is no rows to delete at some shard
         //It corresponds to a SCAN, then NO write then COMMIT on that shard

@@ -81,7 +81,7 @@ public:
     }
 };
 
-class TInFlightReadsTracker {
+class TInFlightReadsTracker: public TMoveOnly {
 private:
     std::map<NOlap::TSnapshot, TSnapshotLiveInfo> SnapshotsLive;
     std::shared_ptr<TRequestsTracerCounters> Counters;
@@ -93,6 +93,10 @@ private:
     NOlap::TSelectInfo::TStats SelectStatsDelta;
 
 public:
+    size_t GetRequestsCount() const {
+        return RequestsMeta.size();
+    }
+
     std::optional<NOlap::TSnapshot> GetSnapshotToClean() const {
         if (SnapshotsLive.empty()) {
             return std::nullopt;
