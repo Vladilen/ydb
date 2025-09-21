@@ -20,6 +20,7 @@ private:
     const ui64 Cookie;
     const NOlap::TSnapshot MvccSnapshot;
     const ui64 LockId;
+    const ui32 LockNodeId;
     const NEvWrite::EModificationType ModificationType;
     const EOperationBehaviour Behaviour;
     const TMonotonic Created = TMonotonic::Now();
@@ -38,8 +39,9 @@ public:
     }
 
     TWriteTask(const std::shared_ptr<TArrowData>& arrowData, const NOlap::ISnapshotSchema::TPtr& schema, const NActors::TActorId sourceId, const NActors::TActorId recipientId,
-        const std::optional<ui32>& granuleShardingVersionId, const TUnifiedPathId pathId, const ui64 cookie, const NOlap::TSnapshot& mvccSnapshot, const ui64 lockId,
-        const NEvWrite::EModificationType modificationType, const EOperationBehaviour behaviour, const std::optional<TDuration> timeout, const ui64 txId, const bool isBulk, const std::optional<ui64>& overloadSubscribeSeqNo)
+        const std::optional<ui32>& granuleShardingVersionId, const TUnifiedPathId pathId, const ui64 cookie, const NOlap::TSnapshot& mvccSnapshot, const ui64 lockId, const ui64 lockNodeId,
+        const NEvWrite::EModificationType modificationType, const EOperationBehaviour behaviour, const std::optional<TDuration> timeout, const ui64 txId, const bool isBulk,
+        const std::optional<ui64>& overloadSubscribeSeqNo)
         : ArrowData(arrowData)
         , Schema(schema)
         , SourceId(sourceId)
@@ -49,13 +51,13 @@ public:
         , Cookie(cookie)
         , MvccSnapshot(mvccSnapshot)
         , LockId(lockId)
+        , LockNodeId(lockNodeId)
         , ModificationType(modificationType)
         , Behaviour(behaviour)
         , Timeout(timeout)
         , TxId(txId)
         , IsBulk(isBulk)
-        , OverloadSubscribeSeqNo(overloadSubscribeSeqNo)
-    {
+        , OverloadSubscribeSeqNo(overloadSubscribeSeqNo) {
     }
 
     const TInternalPathId& GetInternalPathId() const {

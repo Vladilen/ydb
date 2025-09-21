@@ -110,7 +110,7 @@ void TOperationsManager::CommitTransactionOnComplete(
     OnTransactionFinishOnComplete(commited, lock, txId);
 }
 
-void TOperationsManager::AbortLock(TColumnShard& /*owner*/, const ui64 lockId) {
+void TOperationsManager::AbortLock(TColumnShard& owner, const ui64 lockId) {
     auto it = LockFeatures.find(lockId);
     if (it == LockFeatures.end()) {
         return;
