@@ -110,12 +110,36 @@ void TOperationsManager::CommitTransactionOnComplete(
     OnTransactionFinishOnComplete(commited, lock, txId);
 }
 
+void TOperationsManager::AbortLock(TColumnShard& owner, const ui64 lockId) {
+    auto it = LockFeatures.find(lockId);
+    if (it == LockFeatures.end()) {
+        return;
+    }
+    auto& lock = it->second;
+
+    TVector<TWriteOperation::TPtr> aborted;
+    for (auto&& opPtr : lock.GetWriteOperations()) {
+        opPtr->AbortOnComplete(owner);
+        aborted.emplace_back(opPtr);
+    }
+
+    lock.RemoveInteractions(InteractionsContext);
+
+    for (auto&& op : aborted) {
+        RemoveOperationOnComplete(op);
+    }
+
+    LockFeatures.erase(it);
+}
+
 void TOperationsManager::AbortTransactionOnExecute(TColumnShard& owner, const ui64 txId, NTabletFlatExecutor::TTransactionContext& txc) {
     auto* lock = GetLockFeaturesForTxOptional(txId);
     if (!lock) {
         AFL_WARN(NKikimrServices::TX_COLUMNSHARD_TX)("event", "abort")("tx_id", txId)("problem", "finished");
         return;
     }
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD_TX)("event", "abort")("tx_id", txId)("handler", "AbortTransactionOnExecute");
+
     TLogContextGuard gLogging(
         NActors::TLogContextBuilder::Build(NKikimrServices::TX_COLUMNSHARD_TX)("tx_id", txId)("lock_id", lock->GetLockId()));
 
@@ -134,6 +158,8 @@ void TOperationsManager::AbortTransactionOnComplete(TColumnShard& owner, const u
         AFL_WARN(NKikimrServices::TX_COLUMNSHARD_TX)("event", "abort")("tx_id", txId)("problem", "finished");
         return;
     }
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD_TX)("event", "abort")("tx_id", txId)("handler", "AbortTransactionOnComplete");
+
     TLogContextGuard gLogging(
         NActors::TLogContextBuilder::Build(NKikimrServices::TX_COLUMNSHARD_TX)("tx_id", txId)("lock_id", lock->GetLockId()));
 
@@ -285,13 +311,16 @@ void TOperationsManager::AddEventForLock(
     AFL_VERIFY(writer);
     NOlap::NTxInteractions::TTxConflicts txNotifications;
     NOlap::NTxInteractions::TTxConflicts txConflicts;
-    auto& txLock = GetLockVerified(lockId);
+    auto txLock = GetLockOptional(lockId);
+    if (!txLock) {
+        return;
+    }
     writer->CheckInteraction(lockId, InteractionsContext, txConflicts, txNotifications);
     for (auto&& i : txConflicts) {
         if (auto lock = GetLockOptional(i.first)) {
             GetLockVerified(i.first).AddBrokeOnCommit(i.second);
-        } else if (txLock.IsCommitted(i.first)) {
-            txLock.SetBroken();
+        } else if (txLock->IsCommitted(i.first)) {
+            txLock->SetBroken();
         }
     }
     for (auto&& i : txNotifications) {
@@ -300,7 +329,7 @@ void TOperationsManager::AddEventForLock(
     if (auto txEvent = writer->BuildEvent()) {
         NOlap::NTxInteractions::TTxEventContainer container(lockId, txEvent);
         container.AddToInteraction(InteractionsContext);
-        txLock.AddTxEvent(std::move(container));
+        txLock->AddTxEvent(std::move(container));
     }
 }
 

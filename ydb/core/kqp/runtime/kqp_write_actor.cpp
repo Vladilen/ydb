@@ -219,7 +219,7 @@ struct TKqpTableWriterStatistics {
         tableStats->SetWriteBytes(tableStats->GetWriteBytes() + WriteBytes);
         tableStats->SetEraseRows(tableStats->GetEraseRows() + EraseRows);
         tableStats->SetEraseBytes(tableStats->GetEraseBytes() + EraseBytes);
-    
+
         ReadRows = 0;
         ReadBytes = 0;
         WriteRows = 0;
@@ -718,7 +718,7 @@ public:
                     << " Sink=" << this->SelfId() << "."
                     << getIssues().ToOneLineString());
             TxManager->SetError(ev->Get()->Record.GetOrigin());
-            
+
             if (InconsistentTx) {
                 ResetShardRetries(ev->Get()->Record.GetOrigin(), ev->Cookie);
                 RetryResolve();
@@ -778,7 +778,7 @@ public:
                     getIssues());
             }
             return;
-        }        
+        }
         case NKikimrDataEvents::TEvWriteResult::STATUS_OVERLOADED: {
             CA_LOG_W("Got OVERLOADED for table `"
                 << TablePath << "`."
@@ -2275,7 +2275,7 @@ public:
                         {});
                     return false;
                 }
-                AFL_ENSURE(writeActor->GetTableId() == tableId);  
+                AFL_ENSURE(writeActor->GetTableId() == tableId);
                 return true;
             };
 
@@ -2398,7 +2398,7 @@ public:
         message.From = ev->Sender;
         message.Close = ev->Get()->Close;
         message.Data = ev->Get()->Data;
-        
+
         Process();
     }
 
@@ -2438,7 +2438,7 @@ public:
             if (isEmpty) {
                 OnFlushed();
             }
-        } 
+        }
         return true;
     }
 
@@ -2739,7 +2739,7 @@ public:
 
         for (auto& [tabletId, t] : topicTxs) {
             auto& transaction = t.tx;
-            
+
             if (!isImmediateCommit) {
                 FillTopicsCommit(transaction, TxManager);
             }
@@ -2916,7 +2916,7 @@ public:
     void HandlePrepare(TEvPersQueue::TEvProposeTransactionResult::TPtr& ev) {
         auto& event = ev->Get()->Record;
         const ui64 tabletId = event.GetOrigin();
-        
+
         CA_LOG_D("Got ProposeTransactionResult" <<
               ", PQ tablet: " << tabletId <<
               ", status: " << NKikimrPQ::TEvProposeTransactionResult_EStatus_Name(event.GetStatus()));
@@ -2933,7 +2933,7 @@ public:
     void HandleCommit(TEvPersQueue::TEvProposeTransactionResult::TPtr& ev) {
         auto& event = ev->Get()->Record;
         const ui64 tabletId = event.GetOrigin();
-        
+
         CA_LOG_D("Got ProposeTransactionResult" <<
               ", PQ tablet: " << tabletId <<
               ", status: " << NKikimrPQ::TEvProposeTransactionResult_EStatus_Name(event.GetStatus()));

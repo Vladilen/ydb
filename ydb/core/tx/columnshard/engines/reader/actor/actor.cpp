@@ -136,10 +136,12 @@ void TColumnShardScan::HandleScan(NKqp::TEvKqpCompute::TEvScanPing::TPtr&) {
 }
 
 void TColumnShardScan::HandleScan(NActors::TEvents::TEvPoison::TPtr& /*ev*/) noexcept {
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "!!!ABORT TColumnShardScan poisoned");
     PassAway();
 }
 
 void TColumnShardScan::HandleScan(NKqp::TEvKqp::TEvAbortExecution::TPtr& ev) noexcept {
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "!!!ABORT TColumnShardScan aborted");
     auto& msg = ev->Get()->Record;
     const TString reason = ev->Get()->GetIssues().ToOneLineString();
 
@@ -154,6 +156,7 @@ void TColumnShardScan::HandleScan(NKqp::TEvKqp::TEvAbortExecution::TPtr& ev) noe
 }
 
 void TColumnShardScan::HandleScan(TEvents::TEvUndelivered::TPtr& ev) {
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "TColumnShardScan aborted");
     ui32 eventType = ev->Get()->SourceType;
     switch (eventType) {
         case NKqp::TEvKqpCompute::TEvScanInitActor::EventType:
