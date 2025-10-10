@@ -23,6 +23,8 @@
 #include <yql/essentials/utils/yql_panic.h>
 #include <contrib/libs/apache/arrow/cpp/src/arrow/compute/api_vector.h>
 
+#include <fstream>
+
 namespace NKikimrTxDataShard {
     class TKqpTransaction_TScanTaskMeta;
 }
@@ -69,6 +71,14 @@ private:
     mutable std::shared_ptr<arrow::Table> FilteredBatch;
 public:
     std::shared_ptr<arrow::Table> GetFiltered() const {
+        std::ifstream file("/tmp/VLAD_TEST/path_kqp");
+        std::optional<std::string> debugLogsPath;
+        std::string line;
+        if (file.is_open()) {
+            if (std::getline(file, line)) {
+                debugLogsPath = line;
+            }
+        }
         if (!FilteredBatch) {
             if (DataIndexes.size()) {
                 auto permutation = NArrow::MakeFilterPermutation(DataIndexes);
@@ -77,6 +87,22 @@ public:
                 FilteredBatch = Batch;
             }
         }
+
+        if (debugLogsPath) {
+            std::ofstream outfile;
+            outfile.open(*debugLogsPath, std::ios_base::app);
+            outfile << "------------" << std::endl;
+            outfile << "DataIndexes: ";
+            for (const auto& idx : DataIndexes ) {
+                outfile << idx << ",";
+            }
+            outfile << std::endl;
+            outfile << "Data: " << (Batch ? Batch->ToString() : std::string{}) << std::endl;
+            outfile << "FilteredBatch: " << (FilteredBatch ? FilteredBatch->ToString() : std::string{}) << std::endl;
+            outfile.flush();
+            outfile.close();
+        }
+
         return FilteredBatch;
     }
 

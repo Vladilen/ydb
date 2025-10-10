@@ -6,6 +6,12 @@
 #include <ydb/core/tx/columnshard/resource_subscriber/actor.h>
 
 #include <yql/essentials/core/issue/yql_issue.h>
+#include <fstream>
+
+#include <arrow/api.h>
+#include <arrow/io/api.h>
+#include <arrow/ipc/api.h>
+#include <arrow/ipc/feather.h>
 
 namespace NKikimr::NOlap::NReader {
 
@@ -25,10 +31,12 @@ TColumnShardScan::TColumnShardScan(const TActorId& columnShardActorId, const TAc
     const std::shared_ptr<NColumnFetching::TColumnDataManager>& columnDataManager, const TComputeShardingPolicy& computeShardingPolicy,
     ui32 scanId, ui64 txId, ui32 scanGen, ui64 requestCookie, ui64 tabletId, TDuration timeout,
     const TReadMetadataBase::TConstPtr& readMetadataRange, NKikimrDataEvents::EDataFormat dataFormat,
-    const NColumnShard::TScanCounters& scanCountersPool, const NConveyorComposite::TCPULimitsConfig& cpuLimits)
+    const NColumnShard::TScanCounters& scanCountersPool, const NConveyorComposite::TCPULimitsConfig& cpuLimits,
+    const std::optional<std::string>& debugLogsPath)
     : StoragesManager(storagesManager)
     , DataAccessorsManager(dataAccessorsManager)
     , ColumnDataManager(columnDataManager)
+    , DebugLogsPath(debugLogsPath)
     , ColumnShardActorId(columnShardActorId)
     , ScanComputeActorId(scanComputeActorId)
     , BlobCacheActorId(NBlobCache::MakeBlobCacheServiceId())
@@ -412,6 +420,55 @@ bool TColumnShardScan::SendResult(bool pageFault, bool lastBatch) {
     Result->CpuTime = ScanCountersPool.GetExecutionDuration();
     Result->WaitTime = WaitTime;
     Result->RawBytes = ScanCountersPool.GetRawBytes();
+
+    // LastCursorProto
+    // Portion data
+
+    if (DebugLogsPath) {
+        std::ofstream outfile;
+        outfile.open(*DebugLogsPath, std::ios_base::app);
+        outfile << "------------" << std::endl;
+        outfile << "LastCursorProto: " << Result->LastCursorProto.ShortUtf8DebugString() << std::endl;
+        outfile << "RowsCount: " << Result->GetRowsCount() << std::endl;
+        outfile << "DataIndexes: ";
+        for (const auto& idx : Result->SplittedBatches) {
+            outfile << "[";
+            for (const auto& idx2 : idx ) {
+                outfile << idx2 << ",";
+            }
+            outfile << "], ";
+        }
+        outfile << std::endl;
+        outfile << "Data: " << (Result->ArrowBatch ? Result->ArrowBatch->ToString() : std::string{}) << std::endl;
+        outfile.flush();
+        outfile.close();
+
+        if (Result->ArrowBatch) {
+            static int num = 0;
+            arrow::Result<std::shared_ptr<arrow::io::FileOutputStream>> result =
+                arrow::io::FileOutputStream::Open(*DebugLogsPath + std::to_string(Result->LastCursorProto.columnshardsimple().sourceid()) + "." + std::to_string(++num) + ".arrow");
+            if (result.ok()) {
+                std::shared_ptr<arrow::io::FileOutputStream> outfile = *result;
+
+                auto status = arrow::ipc::MakeFileWriter(outfile, Result->ArrowBatch->schema());
+                if (status.ok()) {
+                    std::shared_ptr<arrow::ipc::RecordBatchWriter> writer = *status;
+                    Y_UNUSED(writer->WriteTable(*Result->ArrowBatch));
+                    Y_UNUSED(writer->Close());
+                    Y_UNUSED(outfile->Close());
+                }
+            }
+        }
+    }
+
+    if (AppDataVerified().ColumnShardConfig.GetCombineChunksInResult() && Result->ArrowBatch) {
+        for (const auto& column : Result->ArrowBatch->columns()) {
+            if (column->num_chunks() > 1) {
+                Result->ArrowBatch = Result->ArrowBatch->CombineChunks().ValueOr(Result->ArrowBatch);
+                break;
+            }
+        }
+    }
 
     LWPROBE(SendResult, TabletId, ScanId, TxId, Result->GetRowsCount(), (Result->ArrowBatch ? NArrow::GetTableDataSize(Result->ArrowBatch) : 0), Result->CpuTime, Result->WaitTime, TInstant::Now() - LastSend, Result->Finished);
     Send(ScanComputeActorId, Result.Release(), IEventHandle::FlagTrackDelivery);   // TODO: FlagSubscribeOnSession ?

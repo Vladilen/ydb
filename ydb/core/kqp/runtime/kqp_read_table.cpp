@@ -228,6 +228,8 @@ public:
             TableReader = ComputeCtx.ReadTable(GetCallableId());
         }
 
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "TKqpScanWideReadTableWrapperBase::TableReader->Next");
+
         return TableReader->Next(output);
     }
 
@@ -364,6 +366,8 @@ public:
         if (!TableReader) {
             TableReader = ComputeCtx.ReadTable(GetCallableId());
         }
+
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "TKqpScanBlockReadTableWrapperBase::TableReader->Next");
 
         return TableReader->Next(output);
     }

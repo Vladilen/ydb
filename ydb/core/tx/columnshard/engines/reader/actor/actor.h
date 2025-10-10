@@ -28,6 +28,7 @@ private:
     const std::shared_ptr<NColumnFetching::TColumnDataManager> ColumnDataManager;
     std::optional<TMonotonic> StartInstant;
     std::optional<TMonotonic> FinishInstant;
+    std::optional<std::string> DebugLogsPath;
 
 public:
     virtual void PassAway() override;
@@ -38,7 +39,8 @@ public:
         const std::shared_ptr<NColumnFetching::TColumnDataManager>& columnDataManager, const TComputeShardingPolicy& computeShardingPolicy,
         ui32 scanId, ui64 txId, ui32 scanGen, ui64 requestCookie, ui64 tabletId, TDuration timeout,
         const TReadMetadataBase::TConstPtr& readMetadataRange, NKikimrDataEvents::EDataFormat dataFormat,
-        const NColumnShard::TScanCounters& scanCountersPool, const NConveyorComposite::TCPULimitsConfig& cpuLimits);
+        const NColumnShard::TScanCounters& scanCountersPool, const NConveyorComposite::TCPULimitsConfig& cpuLimits,
+        const std::optional<std::string>& debugLogsPath = std::nullopt);
 
     void Bootstrap(const TActorContext& ctx);
 

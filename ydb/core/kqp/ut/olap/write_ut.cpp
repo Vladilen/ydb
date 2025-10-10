@@ -12,9 +12,39 @@
 
 #include <library/cpp/testing/unittest/registar.h>
 
+#include <fstream>
+#include <library/cpp/string_utils/base64/base64.h>
+#include <yql/essentials/types/binary_json/read.h>
+
 namespace NKikimr::NKqp {
 
 Y_UNIT_TEST_SUITE(KqpOlapWrite) {
+    Y_UNIT_TEST(ReadJsonData) {
+        std::ifstream f("/home/vladilenmuz/json_data");
+        std::ofstream fw("/home/vladilenmuz/json_data_converted");
+        UNIT_ASSERT(f.is_open());
+        UNIT_ASSERT(fw.is_open());
+
+        fw << "json_payload" << std::endl;
+        std::string line;
+        while(std::getline(f, line)) {
+            auto decoded = Base64Decode(line);
+            auto str = NBinaryJson::SerializeToJson(decoded);
+            std::string out;
+            out.reserve(str.size() * 2);
+            for (auto ch : str) {
+                if (ch == '"') {
+                    out.append("\"\"");
+                } else {
+                    out.append(1, ch);
+                }
+            }
+            fw << "\"" << out << "\"" << std::endl;
+        }
+        f.close();
+        fw.close();
+    }
+
     Y_UNIT_TEST(WriteFails) {
         auto csController = NKikimr::NYDBTest::TControllers::RegisterCSControllerGuard<NKikimr::NOlap::TWaitCompactionController>();
         csController->SetSmallSizeDetector(1000000);
