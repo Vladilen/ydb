@@ -1,0 +1,51 @@
+BAD
+!!! Created Merger 8; SH: []
+
+!!! Add source (0): {"data":[{"internal":{"data":"[\n  [\n    1752565829820\n  ]\n]"},"records_count":1,"type":"SparsedArray"},{"internal":{"data":"[\n  [\n    945294066\n  ]\n]"},"records_count":1,"type":"Array"},{"internal":{"data":"[\n  [\n    281474976715663\n  ]\n]"},"records_count":1,"type":"SparsedArray"},{"internal":{"data":"[\n  [\n    945294066\n  ]\n]"},"records_count":1,"type":"Array"},{"internal":{"data":"[\n  [\n    2\n  ]\n]"},"records_count":1,"type":"SparsedArray"}],"records_count":1,"schema":"_yql_plan_step: uint64;id1: int32;_yql_tx_id: uint64;value: int32;_yql_write_id: uint64;"}
+!!! FILTER: {1}[]
+
+!!! Adding To SortHeap (8): {"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"945294066"},{"name":"value","value":"945294066"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32"]},"reverse":true,"position":0,"records_count":1}}
+
+!!! Heap before (8): []
+
+!!! Added To SortHeap (8): [{"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"945294066"},{"name":"value","value":"945294066"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32"]},"reverse":true,"position":0,"records_count":1}}]
+
+!!! Add source (2): {"data":[{"internal":{"data":"[\n  [\n    1752565829960,\n    1752565829960\n  ]\n]"},"records_count":2,"type":"SparsedArray"},{"internal":{"data":"[\n  [\n    945294066,\n    1218666029\n  ]\n]"},"records_count":2,"type":"Array"},{"internal":{"data":"[\n  [\n    281474976715667,\n    281474976715667\n  ]\n]"},"records_count":2,"type":"SparsedArray"},{"internal":{"data":"[\n  [\n    945294071,\n    1218666034\n  ]\n]"},"records_count":2,"type":"Array"},{"internal":{"data":"[\n  [\n    4,\n    4\n  ]\n]"},"records_count":2,"type":"SparsedArray"}],"records_count":2,"schema":"_yql_plan_step: uint64;id1: int32;_yql_tx_id: uint64;value: int32;_yql_write_id: uint64;"}
+!!! FILTER: {1}[]
+
+!!! Adding To SortHeap (8): {"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"1218666029"},{"name":"value","value":"1218666034"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"1218666029"}],"fields":["id1: int32"]},"reverse":true,"position":1,"records_count":2}}
+
+!!! Heap before (8): [{"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"945294066"},{"name":"value","value":"945294066"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32"]},"reverse":true,"position":0,"records_count":1}}]
+
+!!! Added To SortHeap (8): [{"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"1218666029"},{"name":"value","value":"1218666034"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"1218666029"}],"fields":["id1: int32"]},"reverse":true,"position":1,"records_count":2}},{"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"945294066"},{"name":"value","value":"945294066"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32"]},"reverse":true,"position":0,"records_count":1}}]
+
+!!! PutControlPoint Adding To SortHeap (8): {"is_cp":true,"key":{"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32 not null"]},"reverse":true,"position":0,"records_count":1}}
+
+!!! PutControlPoint Added To SortHeap (8): [{"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"1218666029"},{"name":"value","value":"1218666034"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"1218666029"}],"fields":["id1: int32"]},"reverse":true,"position":1,"records_count":2}},{"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"945294066"},{"name":"value","value":"945294066"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32"]},"reverse":true,"position":0,"records_count":1}},{"is_cp":true,"key":{"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32 not null"]},"reverse":true,"position":0,"records_count":1}}]
+
+!!! SkipToBound B (8): [{"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"1218666029"},{"name":"value","value":"1218666034"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"1218666029"}],"fields":["id1: int32"]},"reverse":true,"position":1,"records_count":2}},{"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"945294066"},{"name":"value","value":"945294066"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32"]},"reverse":true,"position":0,"records_count":1}},{"is_cp":true,"key":{"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32 not null"]},"reverse":true,"position":0,"records_count":1}}]
+
+!!! Lower: 1
+
+!!! SkipToBound F (8): [{"is_cp":true,"key":{"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32 not null"]},"reverse":true,"position":0,"records_count":1}},{"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"945294066"},{"name":"value","value":"945294066"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32"]},"reverse":true,"position":0,"records_count":1}}]
+
+!!! merge many
+!!! DrainToControlPoint(8) (f:1)[{"is_cp":true,"key":{"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32 not null"]},"reverse":true,"position":0,"records_count":1}},{"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"945294066"},{"name":"value","value":"945294066"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32"]},"reverse":true,"position":0,"records_count":1}}]
+
+  Current: {"is_cp":true,"key":{"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32 not null"]},"reverse":true,"position":0,"records_count":1}}
+
+!!! BEFORE Removed CP From SortHeap (8): [{"is_cp":true,"key":{"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32 not null"]},"reverse":true,"position":0,"records_count":1}},{"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"945294066"},{"name":"value","value":"945294066"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32"]},"reverse":true,"position":0,"records_count":1}}]
+
+!!! Removed CP From SortHeap (8): [{"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"945294066"},{"name":"value","value":"945294066"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32"]},"reverse":true,"position":0,"records_count":1}}]
+
+!!! DrainCurrentPosition 0 (8): [{"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"945294066"},{"name":"value","value":"945294066"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32"]},"reverse":true,"position":0,"records_count":1}}]
+
+!!! DrainCurrentPosition 2 (8): [{"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"945294066"},{"name":"value","value":"945294066"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32"]},"reverse":true,"position":0,"records_count":1}}]
+
+!!! DrainCurrentPosition 3 (8): [{"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"945294066"},{"name":"value","value":"945294066"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32"]},"reverse":true,"position":0,"records_count":1}}]
+
+>>> Q.front{"is_cp":false,"key":{"data":{"sorting_columns":[{"name":"id1","value":"945294066"},{"name":"value","value":"945294066"}],"fields":["id1: int32","value: int32"]},"sorting":{"sorting_columns":[{"name":"id1","value":"945294066"}],"fields":["id1: int32"]},"reverse":true,"position":0,"records_count":1}}
+>>> RemoveTop
+!!! DrainCurrentPosition 4 (8): []
+
+!!! DrainCurrentPosition 7 finished (8): []

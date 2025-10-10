@@ -1,0 +1,512 @@
+Info: Timeout for test Test [project=ydb/tests/olap/scenario, name=flake8] is turned off
+Info: Timeout for test Test [project=ydb/tests/olap/scenario, name=import_test] is turned off
+Info: Timeout for test Test [project=ydb/tests/olap/scenario, name=py3test] is turned off
+------- [TM] {default-linux-x86_64, relwithdebinfo} ydb/tests/olap/scenario/py3test >> test_alter_compression.py::Test
+Test command err:
+Thread 0 failed
+------- [TM] {default-linux-x86_64, relwithdebinfo} ydb/tests/olap/scenario/py3test >> test_simple.py::TestSimple::tes
+Test command err:
+Thread 0 failed
+Thread 0 failed
+Thread 0 failed
+Thread 0 failed
+------- [TM] {default-linux-x86_64, relwithdebinfo} ydb/tests/olap/scenario/py3test >> test_read_update_write_load.py:
+Test command err:
+Was written: 0.0 MiB, Speed: 0.0 MiB/s
+Step 1. only write
+Write: 10% 2755 30% 2755 50% 2755 90% 2755 99% 2755 ms
+Write: 10% 6690 30% 6690 50% 6690 90% 6690 99% 6690 ms
+Write: 10% 11503 30% 11503 50% 11503 90% 11503 99% 11503 ms
+Write: 10% 11739 30% 11739 50% 11739 90% 11739 99% 11739 ms
+Write: 10% 13317 30% 13317 50% 13317 90% 13317 99% 13317 ms
+Write: 10% 14296 30% 14296 50% 14296 90% 14296 99% 14296 ms
+Write: 10% 14758 30% 14758 50% 14758 90% 14758 99% 14758 ms
+Write: 10% 15135 30% 15135 50% 15135 90% 15135 99% 15135 ms
+Write: 10% 13387 30% 13387 50% 13387 90% 13387 99% 13387 ms
+Write: 10% 14510 30% 14510 50% 14510 90% 14510 99% 14510 ms
+Write: 10% 14895 30% 14895 50% 14895 90% 14895 99% 14895 ms
+Write: 10% 11705 30% 11705 50% 11705 90% 11705 99% 11705 ms
+Write: 10% 10011 30% 10011 50% 10011 90% 10011 99% 10011 ms
+Write: 10% 14652 30% 14652 50% 14652 90% 14652 99% 14652 ms
+Write: 10% 15158 30% 15158 50% 15158 90% 15158 99% 15158 ms
+Write: 10% 14552 30% 14552 50% 14552 90% 14552 99% 14552 ms
+Write: 10% 9176 30% 9176 50% 9176 90% 9176 99% 9176 ms
+Write: 10% 7658 30% 7658 50% 7658 90% 7658 99% 7658 ms
+Write: 10% 16670 30% 16670 50% 16670 90% 16670 99% 16670 ms
+Write: 10% 13322 30% 13322 50% 13322 90% 13322 99% 13322 ms
+Write: 10% 7329 30% 7329 50% 7329 90% 7329 99% 7329 ms
+Write: 10% 11840 30% 11840 50% 11840 90% 11840 99% 11840 ms
+Write: 10% 13662 30% 13662 50% 13662 90% 13662 99% 13662 ms
+Write: 10% 14219 30% 14219 50% 14219 90% 14219 99% 14219 ms
+Write: 10% 9746 30% 9746 50% 9746 90% 9746 99% 9746 ms
+Write: 10% 10252 30% 10252 50% 10252 90% 10252 99% 10252 ms
+Write: 10% 11489 30% 11489 50% 11489 90% 11489 99% 11489 ms
+Write: 10% 10945 30% 10945 50% 10945 90% 10945 99% 10945 ms
+Write: 10% 10704 30% 10704 50% 10704 90% 10704 99% 10704 ms
+Write: 10% 2247 30% 2247 50% 2247 90% 2247 99% 2247 ms
+Write: 10% 6002 30% 6002 50% 6002 90% 6002 99% 6002 ms
+Write: 10% 8372 30% 8372 50% 8372 90% 8372 99% 8372 ms
+Write: 10% 2284 30% 2284 50% 2284 90% 2284 99% 2284 ms
+Write: 10% 8446 30% 8446 50% 8446 90% 8446 99% 8446 ms
+Write: 10% 8921 30% 8921 50% 8921 90% 8921 99% 8921 ms
+Write: 10% 8558 30% 8558 50% 8558 90% 8558 99% 8558 ms
+Write: 10% 4436 30% 4436 50% 4436 90% 4436 99% 4436 ms
+Write: 10% 10425 30% 10425 50% 10425 90% 10425 99% 10425 ms
+Write: 10% 5491 30% 5491 50% 5491 90% 5491 99% 5491 ms
+Write: 10% 7917 30% 7917 50% 7917 90% 7917 99% 7917 ms
+Write: 10% 3434 30% 3434 50% 3434 90% 3434 99% 3434 ms
+Write: 10% 7353 30% 7353 50% 7353 90% 7353 99% 7353 ms
+Write: 10% 4545 30% 4545 50% 4545 90% 4545 99% 4545 ms
+Write: 10% 4170 30% 4170 50% 4170 90% 4170 99% 4170 ms
+Write: 10% 2552 30% 2552 50% 2552 90% 2552 99% 2552 ms
+Write: 10% 2462 30% 2462 50% 2462 90% 2462 99% 2462 ms
+Write: 10% 12359 30% 12359 50% 12359 90% 12359 99% 12359 ms
+Write: 10% 4250 30% 4250 50% 4250 90% 4250 99% 4250 ms
+Write: 10% 3686 30% 3686 50% 3686 90% 3686 99% 3686 ms
+Write: 10% 5707 30% 5707 50% 5707 90% 5707 99% 5707 ms
+Write: 10% 5008 30% 5008 50% 5008 90% 5008 99% 5008 ms
+Write: 10% 2952 30% 2952 50% 2952 90% 2952 99% 2952 ms
+Write: 10% 11915 30% 11915 50% 11915 90% 11915 99% 11915 ms
+Write: 10% 3957 30% 3957 50% 3957 90% 3957 99% 3957 ms
+Write: 10% 2494 30% 2494 50% 2494 90% 2494 99% 2494 ms
+Write: 10% 8122 30% 8122 50% 8122 90% 8122 99% 8122 ms
+Write: 10% 2872 30% 2872 50% 2872 90% 2872 99% 2872 ms
+Write: 10% 4691 30% 4691 50% 4691 90% 4691 99% 4691 ms
+Write: 10% 3851 30% 3851 50% 3851 90% 3851 99% 3851 ms
+Write: 10% 3579 30% 3579 50% 3579 90% 3579 99% 3579 ms
+Write: 10% 2938 30% 2938 50% 2938 90% 2938 99% 2938 ms
+Write: 10% 3055 30% 3055 50% 3055 90% 3055 99% 3055 ms
+Write: 10% 4289 30% 4289 50% 4289 90% 4289 99% 4289 ms
+Write: 10% 5804 30% 5804 50% 5804 90% 5804 99% 5804 ms
+Step 2. read write
+Write: 10% 4008 30% 4008 50% 4008 90% 4008 99% 4008 ms
+Write: 10% 4636 30% 4636 50% 4636 90% 4636 99% 4636 ms
+Write: 10% 6313 30% 6313 50% 6313 90% 6313 99% 6313 ms
+Write: 10% 7067 30% 7067 50% 7067 90% 7067 99% 7067 ms
+Write: 10% 7753 30% 7753 50% 7753 90% 7753 99% 7753 ms
+Write: 10% 9990 30% 9990 50% 9990 90% 9990 99% 9990 ms
+Write: 10% 12889 30% 12889 50% 12889 90% 12889 99% 12889 ms
+Write: 10% 15947 30% 15947 50% 15947 90% 15947 99% 15947 ms
+Write: 10% 15578 30% 15578 50% 15578 90% 15578 99% 15578 ms
+Write: 10% 15869 30% 15869 50% 15869 90% 15869 99% 15869 ms
+Write: 10% 16028 30% 16028 50% 16028 90% 16028 99% 16028 ms
+Write: 10% 16319 30% 16319 50% 16319 90% 16319 99% 16319 ms
+Write: 10% 16575 30% 16575 50% 16575 90% 16575 99% 16575 ms
+Write: 10% 16636 30% 16636 50% 16636 90% 16636 99% 16636 ms
+Write: 10% 13684 30% 13684 50% 13684 90% 13684 99% 13684 ms
+Write: 10% 13575 30% 13575 50% 13575 90% 13575 99% 13575 ms
+Write: 10% 15333 30% 15333 50% 15333 90% 15333 99% 15333 ms
+Write: 10% 9969 30% 9969 50% 9969 90% 9969 99% 9969 ms
+Write: 10% 13047 30% 13047 50% 13047 90% 13047 99% 13047 ms
+Write: 10% 13436 30% 13436 50% 13436 90% 13436 99% 13436 ms
+Write: 10% 15176 30% 15176 50% 15176 90% 15176 99% 15176 ms
+Write: 10% 13332 30% 13332 50% 13332 90% 13332 99% 13332 ms
+Write: 10% 14197 30% 14197 50% 14197 90% 14197 99% 14197 ms
+Write: 10% 11863 30% 11863 50% 11863 90% 11863 99% 11863 ms
+Write: 10% 12608 30% 12608 50% 12608 90% 12608 99% 12608 ms
+Write: 10% 9744 30% 9744 50% 9744 90% 9744 99% 9744 ms
+Write: 10% 9985 30% 9985 50% 9985 90% 9985 99% 9985 ms
+Write: 10% 3535 30% 3535 50% 3535 90% 3535 99% 3535 ms
+Write: 10% 8026 30% 8026 50% 8026 90% 8026 99% 8026 ms
+Write: 10% 8359 30% 8359 50% 8359 90% 8359 99% 8359 ms
+Write: 10% 4297 30% 4297 50% 4297 90% 4297 99% 4297 ms
+Write: 10% 4469 30% 4469 50% 4469 90% 4469 99% 4469 ms
+Write: 10% 6627 30% 6627 50% 6627 90% 6627 99% 6627 ms
+Write: 10% 8830 30% 8830 50% 8830 90% 8830 99% 8830 ms
+Write: 10% 6473 30% 6473 50% 6473 90% 6473 99% 6473 ms
+Write: 10% 8079 30% 8079 50% 8079 90% 8079 99% 8079 ms
+Write: 10% 3427 30% 3427 50% 3427 90% 3427 99% 3427 ms
+Write: 10% 3858 30% 3858 50% 3858 90% 3858 99% 3858 ms
+Write: 10% 7645 30% 7645 50% 7645 90% 7645 99% 7645 ms
+Write: 10% 7597 30% 7597 50% 7597 90% 7597 99% 7597 ms
+Write: 10% 3107 30% 3107 50% 3107 90% 3107 99% 3107 ms
+Write: 10% 5569 30% 5569 50% 5569 90% 5569 99% 5569 ms
+Write: 10% 5924 30% 5924 50% 5924 90% 5924 99% 5924 ms
+Write: 10% 2770 30% 2770 50% 2770 90% 2770 99% 2770 ms
+Write: 10% 3456 30% 3456 50% 3456 90% 3456 99% 3456 ms
+Write: 10% 3375 30% 3375 50% 3375 90% 3375 99% 3375 ms
+Write: 10% 11781 30% 11781 50% 11781 90% 11781 99% 11781 ms
+Write: 10% 2625 30% 2625 50% 2625 90% 2625 99% 2625 ms
+Write: 10% 5385 30% 5385 50% 5385 90% 5385 99% 5385 ms
+Write: 10% 5588 30% 5588 50% 5588 90% 5588 99% 5588 ms
+Write: 10% 6314 30% 6314 50% 6314 90% 6314 99% 6314 ms
+Write: 10% 6205 30% 6205 50% 6205 90% 6205 99% 6205 ms
+Write: 10% 5445 30% 5445 50% 5445 90% 5445 99% 5445 ms
+Write: 10% 4574 30% 4574 50% 4574 90% 4574 99% 4574 ms
+Write: 10% 7229 30% 7229 50% 7229 90% 7229 99% 7229 ms
+Write: 10% 4005 30% 4005 50% 4005 90% 4005 99% 4005 ms
+Write: 10% 3694 30% 3694 50% 3694 90% 3694 99% 3694 ms
+Write: 10% 4266 30% 4266 50% 4266 90% 4266 99% 4266 ms
+Write: 10% 6344 30% 6344 50% 6344 90% 6344 99% 6344 ms
+Write: 10% 2380 30% 2380 50% 2380 90% 2380 99% 2380 ms
+Write: 10% 3886 30% 3886 50% 3886 90% 3886 99% 3886 ms
+Write: 10% 2547 30% 2547 50% 2547 90% 2547 99% 2547 ms
+Write: 10% 2802 30% 2802 50% 2802 90% 2802 99% 2802 ms
+Write: 10% 3435 30% 3435 50% 3435 90% 3435 99% 3435 ms
+Read: 10% 6343 30% 9820 50% 13297 90% 20250 99% 21815 ms
+Step 3. write modify
+Write: 10% 3686 30% 3686 50% 3686 90% 3686 99% 3686 ms
+Write: 10% 3436 30% 3436 50% 3436 90% 3436 99% 3436 ms
+Write: 10% 6929 30% 6929 50% 6929 90% 6929 99% 6929 ms
+Was written: 18.45703125 MiB, Speed: 0.3076171875 MiB/s
+Write: 10% 10000 30% 10000 50% 10000 90% 10000 99% 10000 ms
+Write: 10% 10791 30% 10791 50% 10791 90% 10791 99% 10791 ms
+Write: 10% 9258 30% 9258 50% 9258 90% 9258 99% 9258 ms
+Write: 10% 16574 30% 16574 50% 16574 90% 16574 99% 16574 ms
+Write: 10% 16349 30% 16349 50% 16349 90% 16349 99% 16349 ms
+Write: 10% 17431 30% 17431 50% 17431 90% 17431 99% 17431 ms
+Write: 10% 18551 30% 18551 50% 18551 90% 18551 99% 18551 ms
+Write: 10% 17319 30% 17319 50% 17319 90% 17319 99% 17319 ms
+Write: 10% 16614 30% 16614 50% 16614 90% 16614 99% 16614 ms
+Write: 10% 17739 30% 17739 50% 17739 90% 17739 99% 17739 ms
+Write: 10% 17879 30% 17879 50% 17879 90% 17879 99% 17879 ms
+Write: 10% 16989 30% 16989 50% 16989 90% 16989 99% 16989 ms
+Write: 10% 17437 30% 17437 50% 17437 90% 17437 99% 17437 ms
+Write: 10% 18143 30% 18143 50% 18143 90% 18143 99% 18143 ms
+Write: 10% 17925 30% 17925 50% 17925 90% 17925 99% 17925 ms
+Write: 10% 17438 30% 17438 50% 17438 90% 17438 99% 17438 ms
+Write: 10% 16753 30% 16753 50% 16753 90% 16753 99% 16753 ms
+Write: 10% 15878 30% 15878 50% 15878 90% 15878 99% 15878 ms
+Write: 10% 16010 30% 16010 50% 16010 90% 16010 99% 16010 ms
+Write: 10% 15810 30% 15810 50% 15810 90% 15810 99% 15810 ms
+Write: 10% 9087 30% 9087 50% 9087 90% 9087 99% 9087 ms
+Write: 10% 11900 30% 11900 50% 11900 90% 11900 99% 11900 ms
+Write: 10% 11014 30% 11014 50% 11014 90% 11014 99% 11014 ms
+Write: 10% 10913 30% 10913 50% 10913 90% 10913 99% 10913 ms
+Write: 10% 11214 30% 11214 50% 11214 90% 11214 99% 11214 ms
+Write: 10% 11125 30% 11125 50% 11125 90% 11125 99% 11125 ms
+Write: 10% 13591 30% 13591 50% 13591 90% 13591 99% 13591 ms
+Write: 10% 10148 30% 10148 50% 10148 90% 10148 99% 10148 ms
+Write: 10% 9729 30% 9729 50% 9729 90% 9729 99% 9729 ms
+Write: 10% 8076 30% 8076 50% 8076 90% 8076 99% 8076 ms
+Write: 10% 8974 30% 8974 50% 8974 90% 8974 99% 8974 ms
+Write: 10% 4001 30% 4001 50% 4001 90% 4001 99% 4001 ms
+Write: 10% 4804 30% 4804 50% 4804 90% 4804 99% 4804 ms
+Write: 10% 4845 30% 4845 50% 4845 90% 4845 99% 4845 ms
+Write: 10% 6672 30% 6672 50% 6672 90% 6672 99% 6672 ms
+Write: 10% 3343 30% 3343 50% 3343 90% 3343 99% 3343 ms
+Write: 10% 9097 30% 9097 50% 9097 90% 9097 99% 9097 ms
+Write: 10% 7348 30% 7348 50% 7348 90% 7348 99% 7348 ms
+Write: 10% 6300 30% 6300 50% 6300 90% 6300 99% 6300 ms
+Write: 10% 3902 30% 3902 50% 3902 90% 3902 99% 3902 ms
+Write: 10% 5901 30% 5901 50% 5901 90% 5901 99% 5901 ms
+Write: 10% 6672 30% 6672 50% 6672 90% 6672 99% 6672 ms
+Write: 10% 5983 30% 5983 50% 5983 90% 5983 99% 5983 ms
+Write: 10% 5139 30% 5139 50% 5139 90% 5139 99% 5139 ms
+Write: 10% 7601 30% 7601 50% 7601 90% 7601 99% 7601 ms
+Write: 10% 5623 30% 5623 50% 5623 90% 5623 99% 5623 ms
+Write: 10% 7068 30% 7068 50% 7068 90% 7068 99% 7068 ms
+Write: 10% 7583 30% 7583 50% 7583 90% 7583 99% 7583 ms
+Write: 10% 5433 30% 5433 50% 5433 90% 5433 99% 5433 ms
+Write: 10% 4143 30% 4143 50% 4143 90% 4143 99% 4143 ms
+Write: 10% 4697 30% 4697 50% 4697 90% 4697 99% 4697 ms
+Write: 10% 4595 30% 4595 50% 4595 90% 4595 99% 4595 ms
+Write: 10% 3933 30% 3933 50% 3933 90% 3933 99% 3933 ms
+Write: 10% 5145 30% 5145 50% 5145 90% 5145 99% 5145 ms
+Write: 10% 7528 30% 7528 50% 7528 90% 7528 99% 7528 ms
+Write: 10% 5064 30% 5064 50% 5064 90% 5064 99% 5064 ms
+Write: 10% 4402 30% 4402 50% 4402 90% 4402 99% 4402 ms
+Write: 10% 4944 30% 4944 50% 4944 90% 4944 99% 4944 ms
+Write: 10% 3506 30% 3506 50% 3506 90% 3506 99% 3506 ms
+Write: 10% 11788 30% 11788 50% 11788 90% 11788 99% 11788 ms
+Write: 10% 3872 30% 3872 50% 3872 90% 3872 99% 3872 ms
+Update: 10% 1762 30% 1801 50% 1840 90% 3313 99% 3645 ms
+Step 4. read modify write
+Write: 10% 8851 30% 8851 50% 8851 90% 8851 99% 8851 ms
+Write: 10% 7757 30% 7757 50% 7757 90% 7757 99% 7757 ms
+Write: 10% 11476 30% 11476 50% 11476 90% 11476 99% 11476 ms
+Write: 10% 11466 30% 11466 50% 11466 90% 11466 99% 11466 ms
+Write: 10% 13882 30% 13882 50% 13882 90% 13882 99% 13882 ms
+Write: 10% 15544 30% 15544 50% 15544 90% 15544 99% 15544 ms
+Write: 10% 15629 30% 15629 50% 15629 90% 15629 99% 15629 ms
+Write: 10% 15026 30% 15026 50% 15026 90% 15026 99% 15026 ms
+Write: 10% 14874 30% 14874 50% 14874 90% 14874 99% 14874 ms
+Write: 10% 14490 30% 14490 50% 14490 90% 14490 99% 14490 ms
+Write: 10% 15614 30% 15614 50% 15614 90% 15614 99% 15614 ms
+Write: 10% 13313 30% 13313 50% 13313 90% 13313 99% 13313 ms
+Write: 10% 17203 30% 17203 50% 17203 90% 17203 99% 17203 ms
+Write: 10% 16063 30% 16063 50% 16063 90% 16063 99% 16063 ms
+Write: 10% 12032 30% 12032 50% 12032 90% 12032 99% 12032 ms
+Write: 10% 14523 30% 14523 50% 14523 90% 14523 99% 14523 ms
+Write: 10% 12501 30% 12501 50% 12501 90% 12501 99% 12501 ms
+Write: 10% 17222 30% 17222 50% 17222 90% 17222 99% 17222 ms
+Write: 10% 12979 30% 12979 50% 12979 90% 12979 99% 12979 ms
+Write: 10% 12521 30% 12521 50% 12521 90% 12521 99% 12521 ms
+Write: 10% 7999 30% 7999 50% 7999 90% 7999 99% 7999 ms
+Write: 10% 12680 30% 12680 50% 12680 90% 12680 99% 12680 ms
+Write: 10% 13621 30% 13621 50% 13621 90% 13621 99% 13621 ms
+Write: 10% 11694 30% 11694 50% 11694 90% 11694 99% 11694 ms
+Write: 10% 11916 30% 11916 50% 11916 90% 11916 99% 11916 ms
+Write: 10% 14961 30% 14961 50% 14961 90% 14961 99% 14961 ms
+Write: 10% 5500 30% 5500 50% 5500 90% 5500 99% 5500 ms
+Write: 10% 12307 30% 12307 50% 12307 90% 12307 99% 12307 ms
+Write: 10% 11383 30% 11383 50% 11383 90% 11383 99% 11383 ms
+Write: 10% 5970 30% 5970 50% 5970 90% 5970 99% 5970 ms
+Write: 10% 5897 30% 5897 50% 5897 90% 5897 99% 5897 ms
+Write: 10% 4867 30% 4867 50% 4867 90% 4867 99% 4867 ms
+Write: 10% 11802 30% 11802 50% 11802 90% 11802 99% 11802 ms
+Write: 10% 10565 30% 10565 50% 10565 90% 10565 99% 10565 ms
+Write: 10% 9167 30% 9167 50% 9167 90% 9167 99% 9167 ms
+Write: 10% 8643 30% 8643 50% 8643 90% 8643 99% 8643 ms
+Write: 10% 9021 30% 9021 50% 9021 90% 9021 99% 9021 ms
+Write: 10% 8141 30% 8141 50% 8141 90% 8141 99% 8141 ms
+Write: 10% 9271 30% 9271 50% 9271 90% 9271 99% 9271 ms
+Write: 10% 6473 30% 6473 50% 6473 90% 6473 99% 6473 ms
+Write: 10% 6657 30% 6657 50% 6657 90% 6657 99% 6657 ms
+Write: 10% 7069 30% 7069 50% 7069 90% 7069 99% 7069 ms
+Write: 10% 6295 30% 6295 50% 6295 90% 6295 99% 6295 ms
+Write: 10% 5759 30% 5759 50% 5759 90% 5759 99% 5759 ms
+Write: 10% 5843 30% 5843 50% 5843 90% 5843 99% 5843 ms
+Write: 10% 11900 30% 11900 50% 11900 90% 11900 99% 11900 ms
+Write: 10% 6042 30% 6042 50% 6042 90% 6042 99% 6042 ms
+Write: 10% 4461 30% 4461 50% 4461 90% 4461 99% 4461 ms
+Write: 10% 4266 30% 4266 50% 4266 90% 4266 99% 4266 ms
+Write: 10% 4131 30% 4131 50% 4131 90% 4131 99% 4131 ms
+Write: 10% 4225 30% 4225 50% 4225 90% 4225 99% 4225 ms
+Write: 10% 10668 30% 10668 50% 10668 90% 10668 99% 10668 ms
+Write: 10% 4682 30% 4682 50% 4682 90% 4682 99% 4682 ms
+Write: 10% 11862 30% 11862 50% 11862 90% 11862 99% 11862 ms
+Write: 10% 6944 30% 6944 50% 6944 90% 6944 99% 6944 ms
+Write: 10% 6749 30% 6749 50% 6749 90% 6749 99% 6749 ms
+Write: 10% 9805 30% 9805 50% 9805 90% 9805 99% 9805 ms
+Write: 10% 3849 30% 3849 50% 3849 90% 3849 99% 3849 ms
+Write: 10% 3473 30% 3473 50% 3473 90% 3473 99% 3473 ms
+Write: 10% 3753 30% 3753 50% 3753 90% 3753 99% 3753 ms
+Write: 10% 4074 30% 4074 50% 4074 90% 4074 99% 4074 ms
+Write: 10% 4353 30% 4353 50% 4353 90% 4353 99% 4353 ms
+Write: 10% 5138 30% 5138 50% 5138 90% 5138 99% 5138 ms
+Write: 10% 7500 30% 7500 50% 7500 90% 7500 99% 7500 ms
+Read: 10% 3410 30% 3925 50% 4441 90% 19530 99% 22925 ms
+Update: 10% 1664 30% 1664 50% 1664 90% 1664 99% 1664 ms
+------- [TM] {default-linux-x86_64, relwithdebinfo} ydb/tests/olap/scenario/py3test >> test_insert.py::TestInsert::tes
+Test command err:
+Thread 0 failed
+Thread 2 failed
+Thread 0 failed
+Thread 1 failed
+Thread 4 failed
+Thread 3 failed
+------- [TM] {default-linux-x86_64, relwithdebinfo} ydb/tests/olap/scenario/py3test >> test_alter_tiering.py::TestAlte
+Test command err:
+Thread 0 failed
+
+ydb/tests/olap/scenario <py3test> [size:medium] nchunks:10
+------ [0/10] chunk ran 2 tests (total:6.66s - setup:0.01s test:6.60s)
+[fail] test_alter_compression.py::TestAlterCompression::test[alter_compression] [default-linux-x86_64-relwithdebinfo] (1.67s)
+ydb/tests/olap/scenario/conftest.py:125: in test
+    raise errors[0]
+ydb/tests/olap/scenario/conftest.py:84: in worker
+    self._test_suffix(local_ctx, suffix, codes, idx)
+ydb/tests/olap/scenario/conftest.py:135: in _test_suffix
+    ctx.executable(self, ctx)
+ydb/tests/olap/scenario/test_alter_compression.py:288: in scenario_alter_compression
+    assert self._read_data(ctx=ctx, tables=tables, column_names=column_names)
+ydb/tests/olap/scenario/test_alter_compression.py:196: in _read_data
+    count_rows: int = sth.get_table_rows_count(table)
+ydb/tests/olap/scenario/helpers/scenario_tests_helper.py:667: in get_table_rows_count
+    result_set = self.execute_scan_query(f'SELECT count(*) FROM `{self.get_full_path(tablename)}`')
+ydb/tests/olap/scenario/helpers/scenario_tests_helper.py:476: in execute_scan_query
+    for result_set in it:
+contrib/python/ydb/py3/ydb/_utilities.py:173: in __next__
+    return self._next()
+contrib/python/ydb/py3/ydb/_utilities.py:164: in _next
+    res = self.wrapper(next(self.it))
+contrib/python/ydb/py3/ydb/table.py:1212: in <lambda>
+    lambda resp: _wrap_scan_query_response(resp, self._table_client_settings),
+contrib/python/ydb/py3/ydb/table.py:982: in _wrap_scan_query_response
+    issues._process_response(response)
+contrib/python/ydb/py3/ydb/issues.py:237: in _process_response
+    raise exc_obj(_format_response(response_proto), response_proto.issues)
+E   ydb.issues.SchemeError: message: "Failed to create default pool in database /olap-testing/kikimr/testing/testdb2" severity: 1 issues { message: "Failed to create resource pool: StatusPathDoesNotExist" severity: 1 issues { message: "Path does not exist" issue_code: 200200 severity: 1 } } ,message: "Query failed during adding/waiting in workload pool " severity: 1 (server_code: 400070)
+Log: /home/vladilenmuz/ydbwork/ydb/ydb/tests/olap/scenario/test-results/py3test/chunk0/testing_out_stuff/test_alter_compression.py.TestAlterCompression.test.alter_compression.log
+Logsdir: /home/vladilenmuz/ydbwork/ydb/ydb/tests/olap/scenario/test-results/py3test/chunk0/testing_out_stuff
+------ [1/10] chunk ran 2 tests (total:606.00s - setup:0.02s test:605.93s)
+[fail] test_alter_tiering.py::TestAlterTiering::test[many_tables] [default-linux-x86_64-relwithdebinfo] (601.15s)
+ydb/tests/olap/scenario/conftest.py:125: in test
+    raise errors[0]
+ydb/tests/olap/scenario/conftest.py:84: in worker
+    self._test_suffix(local_ctx, suffix, codes, idx)
+ydb/tests/olap/scenario/conftest.py:135: in _test_suffix
+    ctx.executable(self, ctx)
+ydb/tests/olap/scenario/test_alter_tiering.py:302: in scenario_many_tables
+    self._setup_tiering_test(ctx)
+ydb/tests/olap/scenario/test_alter_tiering.py:143: in _setup_tiering_test
+    sth.execute_scheme_query(UpsertSecret(self.access_key_secret, self.s3_access_key))
+ydb/tests/olap/scenario/helpers/scenario_tests_helper.py:445: in execute_scheme_query
+    self._run_with_expected_status(
+ydb/tests/olap/scenario/helpers/scenario_tests_helper.py:366: in _run_with_expected_status
+    pytest.fail(f'Unexpected status: must be in {repr(expected_status)}, but get {repr(error or status)}')
+E   Failed: Unexpected status: must be in {<StatusCode.SUCCESS: 400000>}, but get DeadlineExceed('Deadline exceeded on request')
+Log: /home/vladilenmuz/ydbwork/ydb/ydb/tests/olap/scenario/test-results/py3test/chunk1/testing_out_stuff/test_alter_tiering.py.TestAlterTiering.test.many_tables.log
+Logsdir: /home/vladilenmuz/ydbwork/ydb/ydb/tests/olap/scenario/test-results/py3test/chunk1/testing_out_stuff
+------ [2/10] chunk ran 2 tests (total:221.18s - setup:0.02s test:220.17s)
+[fail] test_insert.py::TestInsert::test[read_data_during_bulk_upsert] [default-linux-x86_64-relwithdebinfo] (88.93s)
+ydb/tests/olap/scenario/conftest.py:125: in test
+    raise errors[0]
+ydb/tests/olap/scenario/conftest.py:84: in worker
+    self._test_suffix(local_ctx, suffix, codes, idx)
+ydb/tests/olap/scenario/conftest.py:135: in _test_suffix
+    ctx.executable(self, ctx)
+ydb/tests/olap/scenario/test_insert.py:111: in scenario_read_data_during_bulk_upsert
+    rows: int = sth.get_table_rows_count(cnt_table_name0)
+ydb/tests/olap/scenario/helpers/scenario_tests_helper.py:667: in get_table_rows_count
+    result_set = self.execute_scan_query(f'SELECT count(*) FROM `{self.get_full_path(tablename)}`')
+ydb/tests/olap/scenario/helpers/scenario_tests_helper.py:476: in execute_scan_query
+    for result_set in it:
+contrib/python/ydb/py3/ydb/_utilities.py:173: in __next__
+    return self._next()
+contrib/python/ydb/py3/ydb/_utilities.py:164: in _next
+    res = self.wrapper(next(self.it))
+contrib/python/ydb/py3/ydb/table.py:1212: in <lambda>
+    lambda resp: _wrap_scan_query_response(resp, self._table_client_settings),
+contrib/python/ydb/py3/ydb/table.py:982: in _wrap_scan_query_response
+    issues._process_response(response)
+contrib/python/ydb/py3/ydb/issues.py:237: in _process_response
+    raise exc_obj(_format_response(response_proto), response_proto.issues)
+E   ydb.issues.SchemeError: message: "Failed to create default pool in database /olap-testing/kikimr/testing/testdb2" severity: 1 issues { message: "Failed to create resource pool: StatusPathDoesNotExist" severity: 1 issues { message: "Path does not exist" issue_code: 200200 severity: 1 } } ,message: "Query failed during adding/waiting in workload pool " severity: 1 (server_code: 400070)
+Log: /home/vladilenmuz/ydbwork/ydb/ydb/tests/olap/scenario/test-results/py3test/chunk2/testing_out_stuff/test_insert.py.TestInsert.test.read_data_during_bulk_upsert.log
+Logsdir: /home/vladilenmuz/ydbwork/ydb/ydb/tests/olap/scenario/test-results/py3test/chunk2/testing_out_stuff
+[fail] test_insert.py::TestInsert::test_multi[read_data_during_bulk_upsert] [default-linux-x86_64-relwithdebinfo] (123.20s)
+ydb/tests/olap/scenario/conftest.py:116: in test_multi
+    raise errors[0]
+ydb/tests/olap/scenario/conftest.py:84: in worker
+    self._test_suffix(local_ctx, suffix, codes, idx)
+ydb/tests/olap/scenario/conftest.py:135: in _test_suffix
+    ctx.executable(self, ctx)
+ydb/tests/olap/scenario/test_insert.py:111: in scenario_read_data_during_bulk_upsert
+    rows: int = sth.get_table_rows_count(cnt_table_name0)
+ydb/tests/olap/scenario/helpers/scenario_tests_helper.py:667: in get_table_rows_count
+    result_set = self.execute_scan_query(f'SELECT count(*) FROM `{self.get_full_path(tablename)}`')
+ydb/tests/olap/scenario/helpers/scenario_tests_helper.py:476: in execute_scan_query
+    for result_set in it:
+contrib/python/ydb/py3/ydb/_utilities.py:173: in __next__
+    return self._next()
+contrib/python/ydb/py3/ydb/_utilities.py:164: in _next
+    res = self.wrapper(next(self.it))
+contrib/python/ydb/py3/ydb/table.py:1212: in <lambda>
+    lambda resp: _wrap_scan_query_response(resp, self._table_client_settings),
+contrib/python/ydb/py3/ydb/table.py:982: in _wrap_scan_query_response
+    issues._process_response(response)
+contrib/python/ydb/py3/ydb/issues.py:237: in _process_response
+    raise exc_obj(_format_response(response_proto), response_proto.issues)
+E   ydb.issues.SchemeError: message: "Failed to create default pool in database /olap-testing/kikimr/testing/testdb2" severity: 1 issues { message: "Failed to create resource pool: StatusPathDoesNotExist" severity: 1 issues { message: "Path does not exist" issue_code: 200200 severity: 1 } } ,message: "Query failed during adding/waiting in workload pool " severity: 1 (server_code: 400070)
+Log: /home/vladilenmuz/ydbwork/ydb/ydb/tests/olap/scenario/test-results/py3test/chunk2/testing_out_stuff/test_insert.py.TestInsert.test_multi.read_data_during_bulk_upsert.log
+Logsdir: /home/vladilenmuz/ydbwork/ydb/ydb/tests/olap/scenario/test-results/py3test/chunk2/testing_out_stuff
+------ [5/10] chunk ran 8 tests (total:11.75s - test:11.69s)
+[fail] test_simple.py::TestSimple::test[alter_table] [default-linux-x86_64-relwithdebinfo] (1.32s)
+ydb/tests/olap/scenario/conftest.py:125: in test
+    raise errors[0]
+ydb/tests/olap/scenario/conftest.py:84: in worker
+    self._test_suffix(local_ctx, suffix, codes, idx)
+ydb/tests/olap/scenario/conftest.py:135: in _test_suffix
+    ctx.executable(self, ctx)
+ydb/tests/olap/scenario/test_simple.py:77: in scenario_alter_table
+    assert sth.get_table_rows_count(table_name) == 10
+ydb/tests/olap/scenario/helpers/scenario_tests_helper.py:667: in get_table_rows_count
+    result_set = self.execute_scan_query(f'SELECT count(*) FROM `{self.get_full_path(tablename)}`')
+ydb/tests/olap/scenario/helpers/scenario_tests_helper.py:476: in execute_scan_query
+    for result_set in it:
+contrib/python/ydb/py3/ydb/_utilities.py:173: in __next__
+    return self._next()
+contrib/python/ydb/py3/ydb/_utilities.py:164: in _next
+    res = self.wrapper(next(self.it))
+contrib/python/ydb/py3/ydb/table.py:1212: in <lambda>
+    lambda resp: _wrap_scan_query_response(resp, self._table_client_settings),
+contrib/python/ydb/py3/ydb/table.py:982: in _wrap_scan_query_response
+    issues._process_response(response)
+contrib/python/ydb/py3/ydb/issues.py:237: in _process_response
+    raise exc_obj(_format_response(response_proto), response_proto.issues)
+E   ydb.issues.SchemeError: message: "Failed to create default pool in database /olap-testing/kikimr/testing/testdb2" severity: 1 issues { message: "Failed to create resource pool: StatusPathDoesNotExist" severity: 1 issues { message: "Path does not exist" issue_code: 200200 severity: 1 } } ,message: "Query failed during adding/waiting in workload pool " severity: 1 (server_code: 400070)
+Log: /home/vladilenmuz/ydbwork/ydb/ydb/tests/olap/scenario/test-results/py3test/chunk5/testing_out_stuff/test_simple.py.TestSimple.test.alter_table.log
+Logsdir: /home/vladilenmuz/ydbwork/ydb/ydb/tests/olap/scenario/test-results/py3test/chunk5/testing_out_stuff
+[fail] test_simple.py::TestSimple::test[alter_tablestore] [default-linux-x86_64-relwithdebinfo] (0.42s)
+ydb/tests/olap/scenario/conftest.py:125: in test
+    raise errors[0]
+ydb/tests/olap/scenario/conftest.py:84: in worker
+    self._test_suffix(local_ctx, suffix, codes, idx)
+ydb/tests/olap/scenario/conftest.py:135: in _test_suffix
+    ctx.executable(self, ctx)
+ydb/tests/olap/scenario/test_simple.py:101: in scenario_alter_tablestore
+    assert sth.get_table_rows_count(table_name) == 10
+ydb/tests/olap/scenario/helpers/scenario_tests_helper.py:667: in get_table_rows_count
+    result_set = self.execute_scan_query(f'SELECT count(*) FROM `{self.get_full_path(tablename)}`')
+ydb/tests/olap/scenario/helpers/scenario_tests_helper.py:476: in execute_scan_query
+    for result_set in it:
+contrib/python/ydb/py3/ydb/_utilities.py:173: in __next__
+    return self._next()
+contrib/python/ydb/py3/ydb/_utilities.py:164: in _next
+    res = self.wrapper(next(self.it))
+contrib/python/ydb/py3/ydb/table.py:1212: in <lambda>
+    lambda resp: _wrap_scan_query_response(resp, self._table_client_settings),
+contrib/python/ydb/py3/ydb/table.py:982: in _wrap_scan_query_response
+    issues._process_response(response)
+contrib/python/ydb/py3/ydb/issues.py:237: in _process_response
+    raise exc_obj(_format_response(response_proto), response_proto.issues)
+E   ydb.issues.SchemeError: message: "Failed to create default pool in database /olap-testing/kikimr/testing/testdb2" severity: 1 issues { message: "Failed to create resource pool: StatusPathDoesNotExist" severity: 1 issues { message: "Path does not exist" issue_code: 200200 severity: 1 } } ,message: "Query failed during adding/waiting in workload pool " severity: 1 (server_code: 400070)
+Log: /home/vladilenmuz/ydbwork/ydb/ydb/tests/olap/scenario/test-results/py3test/chunk5/testing_out_stuff/test_simple.py.TestSimple.test.alter_tablestore.log
+Logsdir: /home/vladilenmuz/ydbwork/ydb/ydb/tests/olap/scenario/test-results/py3test/chunk5/testing_out_stuff
+[fail] test_simple.py::TestSimple::test[table] [default-linux-x86_64-relwithdebinfo] (0.37s)
+ydb/tests/olap/scenario/conftest.py:125: in test
+    raise errors[0]
+ydb/tests/olap/scenario/conftest.py:84: in worker
+    self._test_suffix(local_ctx, suffix, codes, idx)
+ydb/tests/olap/scenario/conftest.py:135: in _test_suffix
+    ctx.executable(self, ctx)
+ydb/tests/olap/scenario/test_simple.py:61: in scenario_table
+    self._test_table(ctx, 'testTable')
+ydb/tests/olap/scenario/test_simple.py:41: in _test_table
+    assert sth.get_table_rows_count(table_name) == 2
+ydb/tests/olap/scenario/helpers/scenario_tests_helper.py:667: in get_table_rows_count
+    result_set = self.execute_scan_query(f'SELECT count(*) FROM `{self.get_full_path(tablename)}`')
+ydb/tests/olap/scenario/helpers/scenario_tests_helper.py:476: in execute_scan_query
+    for result_set in it:
+contrib/python/ydb/py3/ydb/_utilities.py:173: in __next__
+    return self._next()
+contrib/python/ydb/py3/ydb/_utilities.py:164: in _next
+    res = self.wrapper(next(self.it))
+contrib/python/ydb/py3/ydb/table.py:1212: in <lambda>
+    lambda resp: _wrap_scan_query_response(resp, self._table_client_settings),
+contrib/python/ydb/py3/ydb/table.py:982: in _wrap_scan_query_response
+    issues._process_response(response)
+contrib/python/ydb/py3/ydb/issues.py:237: in _process_response
+    raise exc_obj(_format_response(response_proto), response_proto.issues)
+E   ydb.issues.SchemeError: message: "Failed to create default pool in database /olap-testing/kikimr/testing/testdb2" severity: 1 issues { message: "Failed to create resource pool: StatusPathDoesNotExist" severity: 1 issues { message: "Path does not exist" issue_code: 200200 severity: 1 } } ,message: "Query failed during adding/waiting in workload pool " severity: 1 (server_code: 400070)
+Log: /home/vladilenmuz/ydbwork/ydb/ydb/tests/olap/scenario/test-results/py3test/chunk5/testing_out_stuff/test_simple.py.TestSimple.test.table.log
+Logsdir: /home/vladilenmuz/ydbwork/ydb/ydb/tests/olap/scenario/test-results/py3test/chunk5/testing_out_stuff
+[fail] test_simple.py::TestSimple::test[tablestores] [default-linux-x86_64-relwithdebinfo] (0.43s)
+ydb/tests/olap/scenario/conftest.py:125: in test
+    raise errors[0]
+ydb/tests/olap/scenario/conftest.py:84: in worker
+    self._test_suffix(local_ctx, suffix, codes, idx)
+ydb/tests/olap/scenario/conftest.py:135: in _test_suffix
+    ctx.executable(self, ctx)
+ydb/tests/olap/scenario/test_simple.py:66: in scenario_tablestores
+    self._test_table(ctx, 'testStore/testTable')
+ydb/tests/olap/scenario/test_simple.py:41: in _test_table
+    assert sth.get_table_rows_count(table_name) == 2
+ydb/tests/olap/scenario/helpers/scenario_tests_helper.py:667: in get_table_rows_count
+    result_set = self.execute_scan_query(f'SELECT count(*) FROM `{self.get_full_path(tablename)}`')
+ydb/tests/olap/scenario/helpers/scenario_tests_helper.py:476: in execute_scan_query
+    for result_set in it:
+contrib/python/ydb/py3/ydb/_utilities.py:173: in __next__
+    return self._next()
+contrib/python/ydb/py3/ydb/_utilities.py:164: in _next
+    res = self.wrapper(next(self.it))
+contrib/python/ydb/py3/ydb/table.py:1212: in <lambda>
+    lambda resp: _wrap_scan_query_response(resp, self._table_client_settings),
+contrib/python/ydb/py3/ydb/table.py:982: in _wrap_scan_query_response
+    issues._process_response(response)
+contrib/python/ydb/py3/ydb/issues.py:237: in _process_response
+    raise exc_obj(_format_response(response_proto), response_proto.issues)
+E   ydb.issues.SchemeError: message: "Failed to create default pool in database /olap-testing/kikimr/testing/testdb2" severity: 1 issues { message: "Failed to create resource pool: StatusPathDoesNotExist" severity: 1 issues { message: "Path does not exist" issue_code: 200200 severity: 1 } } ,message: "Query failed during adding/waiting in workload pool " severity: 1 (server_code: 400070)
+Log: /home/vladilenmuz/ydbwork/ydb/ydb/tests/olap/scenario/test-results/py3test/chunk5/testing_out_stuff/test_simple.py.TestSimple.test.tablestores.log
+Logsdir: /home/vladilenmuz/ydbwork/ydb/ydb/tests/olap/scenario/test-results/py3test/chunk5/testing_out_stuff
+------ FAIL: 10 - GOOD, 8 - FAIL ydb/tests/olap/scenario
+
+Total 3 suites:
+	2 - GOOD
+	1 - FAIL
+Total 26 tests:
+	18 - GOOD
+	8 - FAIL
+Failed

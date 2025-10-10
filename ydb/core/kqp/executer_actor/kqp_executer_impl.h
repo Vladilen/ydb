@@ -51,6 +51,7 @@
 #include <ydb/library/actors/async/wait_for_event.h>
 
 #include <util/generic/size_literals.h>
+// #include <fstream>
 
 
 LWTRACE_USING(KQP_PROVIDER);
@@ -354,6 +355,18 @@ protected:
 
     void HandleChannelData(NYql::NDq::TEvDqCompute::TEvChannelData::TPtr& ev) {
         auto& record = ev->Get()->Record;
+        // std::ifstream file("/tmp/VLAD_TEST/path_kqp");
+        // if (file.is_open()) {
+        //     std::string line;
+        //     if (std::getline(file, line)) {
+        //         static int iii = 0;
+        //         std::ofstream outfile;
+        //         outfile.open(line + std::to_string(++iii) + ".debug", std::ios_base::app);
+        //         outfile << record.DebugString() << std::endl;
+        //         outfile.flush();
+        //         outfile.close();
+        //     }
+        // }
         auto& channelData = record.GetChannelData();
         auto& channel = TasksGraph.GetChannel(channelData.GetChannelId());
         const TActorId channelComputeActorId = ev->Sender;

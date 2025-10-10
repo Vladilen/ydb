@@ -4,6 +4,7 @@
 #include <ydb/core/tx/columnshard/engines/reader/actor/actor.h>
 #include <ydb/core/tx/columnshard/engines/reader/plain_reader/constructor/constructor.h>
 #include <ydb/core/tx/columnshard/transactions/locks/read_start.h>
+#include <fstream>
 
 namespace NKikimr::NOlap::NReader {
 
@@ -45,7 +46,18 @@ void TTxScan::Complete(const TActorContext& ctx) {
             return TReadMetadataBase::ESorting::NONE;
         }
     }();
-    TScannerConstructorContext context(snapshot, request.HasItemsLimit() ? request.GetItemsLimit() : 0, sorting);
+    const auto limit = request.HasItemsLimit() ? request.GetItemsLimit() : 0;
+    TScannerConstructorContext context(snapshot, limit, sorting);
+    std::optional<std::string> debugLogsPath;
+    if (limit > 0 && limit % 53 == 0) {
+        std::ifstream file("/tmp/VLAD_TEST/path");
+        std::string line;
+        if (file.is_open()) {
+            if (std::getline(file, line)) {
+                debugLogsPath = line;
+            }
+        }
+    }
     const auto scanId = request.GetScanId();
     const ui64 txId = request.GetTxId();
     const ui32 scanGen = request.GetGeneration();
@@ -178,7 +190,7 @@ void TTxScan::Complete(const TActorContext& ctx) {
 
     auto scanActorId = ctx.Register(new TColumnShardScan(Self->SelfId(), scanComputeActor, Self->GetStoragesManager(),
         Self->DataAccessorsManager.GetObjectPtrVerified(), Self->ColumnDataManager.GetObjectPtrVerified(), shardingPolicy, scanId, txId, scanGen,
-        requestCookie, Self->TabletID(), timeout, readMetadataRange, dataFormat, Self->Counters.GetScanCounters(), cpuLimits));
+        requestCookie, Self->TabletID(), timeout, readMetadataRange, dataFormat, Self->Counters.GetScanCounters(), cpuLimits, debugLogsPath));
     Self->InFlightReadsTracker.AddScanActorId(requestCookie, scanActorId);
 
     AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD_SCAN)("event", "TTxScan started")("actor_id", scanActorId)("trace_detailed", detailedInfo);

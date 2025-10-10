@@ -15,6 +15,8 @@
 #include <contrib/libs/apache/arrow/cpp/src/arrow/compute/cast.h>
 #include <contrib/libs/apache/arrow/cpp/src/arrow/compute/api_scalar.h>
 
+#include <fstream>
+
 namespace NKikimr {
 namespace NMiniKQL {
 
@@ -506,6 +508,8 @@ ui32 TKqpScanComputeContext::TScanData::TRowBatchReader::FillDataValues(NUdf::TU
         RowBatches.pop();
     }
 
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "TKqpScanComputeContext::TScanData::TRowBatchReader::FillDataValues");
+
     YQL_ENSURE(RowBatches.empty() == (StoredBytes < 1), "StoredBytes miscalculated!");
     return resultColumnsCount;
 }
@@ -514,6 +518,8 @@ ui32 TKqpScanComputeContext::TScanData::TBlockBatchReader::FillDataValues(NUdf::
     YQL_ENSURE(!BlockBatches.empty());
     auto& batch = BlockBatches.front();
     const ui32 resultColumnsCount = batch.FillBlockValues(result);
+
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "TKqpScanComputeContext::TScanData::TBlockBatchReader::FillDataValues");
 
     StoredBytes -= batch.BytesForRecordEstimation();
     BlockBatches.pop();
@@ -688,7 +694,21 @@ TBytesStatistics TKqpScanComputeContext::TScanData::TBlockBatchReader::AddData(c
     TBytesStatistics stats;
     auto totalColsCount = TotalColumnsCount + 1;
     auto batches = NArrow::SliceToRecordBatches(dataAccessor.GetFiltered());
+    int iii = 0;
     for (auto&& filtered : batches) {
+        std::ifstream file("/tmp/VLAD_TEST/path_kqp");
+        if (file.is_open()) {
+            std::string line;
+            if (std::getline(file, line)) {
+                std::ofstream outfile;
+                outfile.open(line, std::ios_base::app);
+                outfile << "------------ FILTERED " << ++iii << " ------------" << std::endl;
+                outfile << "Data: " << (filtered ? filtered->ToString() : std::string{}) << std::endl;
+                outfile.flush();
+                outfile.close();
+            }
+        }
+
         TUnboxedValueVector batchValues;
         batchValues.resize(totalColsCount);
         Y_ENSURE(TotalColumnsCount == static_cast<ui32>(filtered->num_columns()));
@@ -792,6 +812,8 @@ public:
             }
             return EFetchResult::Yield;
         }
+
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "TKqpTableReader::Next");
 
         ScanData.FillDataValues(result);
 
