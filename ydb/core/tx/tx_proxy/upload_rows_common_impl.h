@@ -415,6 +415,11 @@ private:
                     if (!accessor.DeserializeFromProto(colInfo.GetDataAccessorConstructor())) {
                         return TConclusionStatus::Fail("cannot parse accessor for column: " + name);
                     }
+                    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)
+                        ("event", "VLAD_HasInternalConversion")
+                        ("name", name)
+                        ("accessor->HasInternalConversion()", accessor->HasInternalConversion())
+                        ;
                     if (accessor->HasInternalConversion()) {
                         HasInternalConversion.emplace(name);
                     }

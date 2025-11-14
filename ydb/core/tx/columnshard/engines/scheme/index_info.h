@@ -152,6 +152,10 @@ private:
 
     const TString& GetIndexStorageId(const ui32 indexId, const TString& specialTier) const {
         auto it = Indexes.find(indexId);
+        if (it == Indexes.end()) {
+            static TString empty("__INVALID_STORAGE_ID");
+            return empty;
+        }
         AFL_VERIFY(it != Indexes.end());
         if (specialTier && specialTier != IStoragesManager::DefaultStorageId && it->second->GetInheritPortionStorage()) {
             return specialTier;

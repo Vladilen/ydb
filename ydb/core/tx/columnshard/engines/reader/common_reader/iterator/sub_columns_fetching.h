@@ -196,6 +196,7 @@ private:
         TBlobsAction blobsAction(StoragesManager, NBlobOperations::EConsumer::SCAN);
         auto reading = blobsAction.GetReading(*StorageId);
         reading->SetIsBackgroundProcess(false);
+        auto debugBlobString = blobs.DebugString();
         for (auto&& i : ColumnChunks) {
             if (!!i.GetHeaderRange()) {
                 const TString readBlob = blobs.ExtractVerified(*StorageId, *i.GetHeaderRange());
@@ -213,7 +214,7 @@ private:
                     } else {
                         size = *fullHeader;
                     }
-                    AFL_VERIFY(blob.size() < size)("blob", blob.size())("size", size);
+                    AFL_VERIFY(blob.size() < size)("blob", blob.size())("size", size)("blobs.DebugString()", debugBlobString);
                     const TBlobRange headerRange = i.GetFullChunkRange().BuildSubset(blob.size(), size - blob.size());
                     reading->AddRange(headerRange);
                     i.SetHeaderRange(headerRange);

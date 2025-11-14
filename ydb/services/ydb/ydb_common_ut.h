@@ -220,7 +220,7 @@ struct TTestOlap {
                 arrow::field("uid", arrow::utf8(), false),
                 arrow::field("level", arrow::int32()),
                 arrow::field("message", arrow::utf8()),
-                arrow::field("json_payload", arrow::binary()),
+                arrow::field("json_payload", arrow::utf8()),
                 arrow::field("ingested_at", tsType),
                 arrow::field("saved_at", tsType),
                 arrow::field("request_id", arrow::utf8()),
@@ -330,7 +330,7 @@ struct TTestOlap {
             Y_ABORT_UNLESS(NArrow::Append<arrow::StringType>(*builders[3], s));
             Y_ABORT_UNLESS(NArrow::Append<arrow::Int32Type>(*builders[4], i));
             Y_ABORT_UNLESS(NArrow::Append<arrow::StringType>(*builders[5], s + "str"));
-            Y_ABORT_UNLESS(NArrow::Append<arrow::BinaryType>(*builders[6], "{ \"value\": " + s + " }"));
+            Y_ABORT_UNLESS(NArrow::Append<arrow::StringType>(*builders[6], "{ \"value\": " + s + " }"));
             Y_ABORT_UNLESS(NArrow::Append<arrow::StringType>(*builders[9], s + "str"));
             Y_ABORT_UNLESS(NArrow::Append<arrow::FloatType>(*builders[10], i * 1.5f));
             Y_ABORT_UNLESS(NArrow::Append<arrow::DoubleType>(*builders[11], i * 2.5));

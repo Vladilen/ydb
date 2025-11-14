@@ -8,6 +8,7 @@
 #include <ydb/core/tx/columnshard/engines/storage/chunks/column.h>
 #include <ydb/core/tx/columnshard/hooks/abstract/abstract.h>
 #include <ydb/core/tx/columnshard/splitter/batch_slice.h>
+#include <ydb/core/formats/arrow/accessor/abstract/accessor.h>
 
 #include <ydb/library/formats/arrow/simple_arrays_cache.h>
 #include <ydb/core/base/appdata_fwd.h>
@@ -338,6 +339,24 @@ TConclusion<TWritePortionInfoWithBlobsResult> ISnapshotSchema::PrepareForWrite(c
             saver.AddSerializerWithBorder(100000000, NArrow::NSerialization::TNativeSerializer::GetFast());
             const auto& columnFeatures = GetIndexInfo().GetColumnFeaturesVerified(columnId);
             auto accessor = std::make_shared<NArrow::NAccessor::TTrivialArray>(incomingBatch->column(incomingIndex));
+            {
+                NArrow::NAccessor::IChunkedArray::TReader reader(accessor);
+                for (ui32 i = 0; i < reader.GetRecordsCount(); ++i) {
+                    auto address = reader.GetReadChunk(i);
+                    auto array = address.GetArray();
+                    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "VLAD_ARRAY_DATA")
+                        ("GetIndexInfo().GetColumnName(columnId, false)", GetIndexInfo().GetColumnName(columnId, false))
+                        ("array->length()", array ? array->length() : -1)
+                        ("array->type()->id()", array ? array->type()->id() : -1);
+                        ;
+                    if (GetIndexInfo().GetColumnName(columnId, false) == "json_payload" &&
+                        (!array || array->length() == 0 || array->type()->id() != arrow::binary()->id())) {
+                        AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "VLAD_BAD_ARRAY")
+                            ("array->length()", array ? array->length() : -1)
+                            ("array->type()->id()", array ? array->type()->id() : -1);
+                    }
+                }
+            }
             TConclusion<std::shared_ptr<NArrow::NAccessor::IChunkedArray>> arrToWrite =
                 loader->GetAccessorConstructor()->Construct(accessor, loader->BuildAccessorContext(accessor->GetRecordsCount()));
             if (arrToWrite.IsFail()) {

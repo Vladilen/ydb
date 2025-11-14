@@ -1,4 +1,5 @@
 #include <ydb/core/base/blobstorage.h>
+#include <ydb/core/formats/arrow/serializer/native.h>
 #include <ydb/core/kqp/compute_actor/kqp_compute_events.h>
 #include <ydb/core/protos/config.pb.h>
 #include <ydb/core/tx/columnshard/columnshard_impl.h>
@@ -26,6 +27,8 @@
 #include <arrow/ipc/reader.h>
 #include <util/string/join.h>
 #include <util/string/printf.h>
+
+#include <fstream>
 
 namespace NKikimr {
 
@@ -1557,6 +1560,140 @@ void TestReadAggregate(const std::vector<NArrow::NTest::TTestColumn>& ydbSchema,
 }   // namespace
 
 Y_UNIT_TEST_SUITE(EvWrite) {
+    Y_UNIT_TEST(WriteJsonFromFile) {
+        std::ifstream currentTestFile("/home/vladilenmuz/ydbwork/vlad_check_writing/current_test");
+        AFL_VERIFY(currentTestFile.is_open());
+        std::string currentTest;
+        AFL_VERIFY(std::getline(currentTestFile, currentTest));
+        currentTestFile.close();
+
+        std::ifstream subColumnsFile("/home/vladilenmuz/ydbwork/vlad_check_writing/sub_columns");
+        AFL_VERIFY(subColumnsFile.is_open());
+        std::string subColumns;
+        AFL_VERIFY(std::getline(subColumnsFile, subColumns));
+        subColumnsFile.close();
+
+        using namespace NArrow;
+
+        TTestBasicRuntime runtime;
+        TTester::Setup(runtime);
+        auto csDefaultControllerGuard = NKikimr::NYDBTest::TControllers::RegisterCSControllerGuard<TDefaultTestsController>();
+
+        const ui64 tableId = 1;
+
+        NArrow::NTest::TTestColumn jsonPayloadColumns("json_payload", TTypeInfo(NTypeIds::JsonDocument));
+        if (subColumns == "SUB_COLUMNS") {
+            jsonPayloadColumns.SetAccessorClassName("SUB_COLUMNS");
+        }
+        const std::vector<NArrow::NTest::TTestColumn> schema = {
+            NArrow::NTest::TTestColumn("timestamp", TTypeInfo(NTypeIds::Timestamp)),
+            NArrow::NTest::TTestColumn("resource_type", TTypeInfo(NTypeIds::Utf8)),
+            NArrow::NTest::TTestColumn("resource_id", TTypeInfo(NTypeIds::Utf8)),
+            NArrow::NTest::TTestColumn("stream_name", TTypeInfo(NTypeIds::Utf8)),
+            NArrow::NTest::TTestColumn("partition", TTypeInfo(NTypeIds::Uint32)),
+            NArrow::NTest::TTestColumn("offset", TTypeInfo(NTypeIds::Uint64)),
+            NArrow::NTest::TTestColumn("index", TTypeInfo(NTypeIds::Uint32)),
+            NArrow::NTest::TTestColumn("level", TTypeInfo(NTypeIds::Int32)),
+            NArrow::NTest::TTestColumn("message", TTypeInfo(NTypeIds::Utf8)),
+            std::move(jsonPayloadColumns),
+            NArrow::NTest::TTestColumn("ingested_at", TTypeInfo(NTypeIds::Timestamp)),
+            NArrow::NTest::TTestColumn("saved_at", TTypeInfo(NTypeIds::Timestamp)),
+            NArrow::NTest::TTestColumn("request_id", TTypeInfo(NTypeIds::Utf8))};
+        [[maybe_unused]] auto planStep = PrepareTablet(runtime, tableId, schema, 7);
+        const ui64 tabletId = TTestTxConfig::TxTablet0;
+
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "VLAD_NEXT_WRITE")("currentTest", currentTest);
+        auto evWrite = std::make_unique<NKikimr::NEvents::TDataEvents::TEvWrite>();
+        std::ifstream protoFile("/home/vladilenmuz/ydbwork/vlad_check_writing/" + currentTest + ".proto", std::ios_base::binary);
+        AFL_VERIFY(protoFile.is_open());
+        AFL_VERIFY(evWrite->Record.ParseFromIstream(&protoFile));
+        protoFile.close();
+
+
+        std::ifstream payloadFile("/home/vladilenmuz/ydbwork/vlad_check_writing/" + currentTest + ".payload", std::ios_base::binary);
+        AFL_VERIFY(payloadFile.is_open());
+
+        std::stringstream buffer;
+        buffer << payloadFile.rdbuf();
+
+        NEvWrite::TPayloadWriter<NKikimr::NEvents::TDataEvents::TEvWrite>(*evWrite).AddDataToPayload(TString(buffer.str()));
+        payloadFile.close();
+
+
+        auto operationTableId = evWrite->Record.MutableOperations(0)->MutableTableId();
+        operationTableId->SetTableId(tableId);
+        operationTableId->SetSchemaVersion(1);
+        operationTableId->SetOwnerId(0);
+
+        {
+            NKikimr::NArrow::NSerialization::TNativeSerializer serializer;
+            auto schema = std::make_shared<arrow::Schema>(arrow::FieldVector({
+                std::make_shared<arrow::Field>("timestamp", arrow::timestamp(arrow::TimeUnit::MICRO)),
+                std::make_shared<arrow::Field>("resource_type", arrow::utf8()),
+                std::make_shared<arrow::Field>("resource_id", arrow::utf8()),
+                std::make_shared<arrow::Field>("stream_name", arrow::utf8()),
+                std::make_shared<arrow::Field>("partition", arrow::uint32()),
+                std::make_shared<arrow::Field>("offset", arrow::uint64()),
+                std::make_shared<arrow::Field>("index", arrow::uint32()),
+                std::make_shared<arrow::Field>("level", arrow::int32()),
+                std::make_shared<arrow::Field>("message", arrow::utf8()),
+                std::make_shared<arrow::Field>("ingested_at", arrow::timestamp(arrow::TimeUnit::MICRO)),
+                std::make_shared<arrow::Field>("saved_at", arrow::timestamp(arrow::TimeUnit::MICRO)),
+                std::make_shared<arrow::Field>("request_id", arrow::utf8())
+            }));
+
+            // class TPayloadReader111: public NEvWrite::IPayloadReader {
+            //     TString Data;
+            // public:
+            //     TPayloadReader111(const TString& data)
+            //         : Data(data)
+            //     {
+            //     }
+
+            //     TString GetDataFromPayload(const ui64) const override {
+            //         return Data;
+            //     }
+            // };
+
+
+            Cout << "VLAD_START!!!:" << Endl;
+            auto payloadSchema = NArrow::DeserializeSchema(evWrite->Record.GetOperations(0).GetPayloadSchema());
+            auto result = NArrow::DeserializeBatch(TString(buffer.str()), payloadSchema);
+            if (!result) {
+                Cout << "VLAD_NOT_OK!!!" << Endl;
+            } else {
+                Cout << result->ToString() << Endl;
+            }
+
+            // arrow::Result<std::shared_ptr<arrow::RecordBatch>> result = serializer.Deserialize(data, schema);
+            // if (result.status().ok()) {
+            //     auto [it, inserted] = results.insert((*result)->ToString());
+            //     Cout << *it << Endl;
+            // } else {
+            //     Cout << "VLAD_NOT_OK!!!" << result.status().ToString() << Endl;
+
+            // }
+            Cout << "VLAD_END!!!" << Endl;
+        }
+
+        auto sender = runtime.AllocateEdgeActor();
+        auto payloadSchema = NArrow::DeserializeSchema(evWrite->Record.GetOperations(0).GetPayloadSchema());
+        auto recordsCount = NArrow::DeserializeBatch(TString(buffer.str()), payloadSchema)->num_rows();
+
+        ForwardToTablet(runtime, tabletId, sender, evWrite.release());
+
+        TAutoPtr<NActors::IEventHandle> handle;
+        auto event = runtime.GrabEdgeEvent<NKikimr::NEvents::TDataEvents::TEvWriteResult>(handle);
+        AFL_VERIFY(event);
+
+        AFL_VERIFY(event->Record.GetOrigin() == tabletId);
+        AFL_VERIFY(event->Record.GetStatus() == NKikimrDataEvents::TEvWriteResult::STATUS_COMPLETED);
+
+
+        auto readResult = ReadAllAsBatch(runtime, tableId, NOlap::TSnapshot::MaxForPlanStep(planStep), schema);
+        UNIT_ASSERT_VALUES_EQUAL(readResult->num_rows(), recordsCount);
+    }
+
     Y_UNIT_TEST(WriteInTransaction) {
         using namespace NArrow;
 

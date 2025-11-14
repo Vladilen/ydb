@@ -178,6 +178,65 @@ void CreateExtTable(const TServerSettings& settings, ui32 shards = 2,
 
 Y_UNIT_TEST_SUITE(YdbTableBulkUpsertOlap) {
 
+    Y_UNIT_TEST(UpsertJsonBatch) {
+        TKikimrWithGrpcAndRootSchema server(GetAppConfig());
+        server.Server_->GetRuntime()->SetLogPriority(NKikimrServices::TX_COLUMNSHARD, NActors::NLog::PRI_DEBUG);
+
+        TClient annoyingClient(*server.ServerSettings);
+        annoyingClient.SetSecurityToken("root@builtin");
+        auto status = annoyingClient.CreateColumnTable("/Root", Sprintf(R"(
+            Name: "%s"
+            ColumnShardCount : %d
+            Sharding {
+                HashSharding {
+                    Function: HASH_FUNCTION_CLOUD_LOGS
+                    Columns: ["timestamp", "uid"]
+                }
+            }
+            Schema {
+                Columns { Name: "timestamp" Type: "Timestamp" NotNull : true }
+                Columns { Name: "resource_type" Type: "Utf8" }
+                Columns { Name: "resource_id" Type: "Utf8" }
+                Columns { Name: "uid" Type: "Utf8" NotNull : true }
+                Columns { Name: "level" Type: "Int32" }
+                Columns { Name: "message" Type: "Utf8" }
+                Columns { Name: "json_payload" Type: "JsonDocument" DataAccessorConstructor { ClassName: "SUB_COLUMNS" } }
+                Columns { Name: "ingested_at" Type: "Timestamp" }
+                Columns { Name: "saved_at" Type: "Timestamp" }
+                Columns { Name: "request_id" Type: "Utf8" }
+                Columns { Name: "flt" Type: "Float" }
+                Columns { Name: "dbl" Type: "Double" }
+                KeyColumnNames: "timestamp"
+                KeyColumnNames: "uid"
+            }
+        )", TTestOlap::TableName, 1));
+        UNIT_ASSERT_VALUES_EQUAL(status, NMsgBusProxy::EResponseStatus::MSTATUS_OK);
+
+
+        ui16 grpc = server.GetPort();
+        TString location = TStringBuilder() << "localhost:" << grpc;
+        auto connection = NYdb::TDriver(TDriverConfig().SetEndpoint(location));
+
+        NYdb::NTable::TTableClient client(connection);
+        auto session = client.GetSession().ExtractValueSync().GetSession();
+        TString tablePath = TString("/Root/") + TTestOlap::TableName;
+
+        auto srcBatch = TTestOlap::SampleBatch();
+        auto schema = srcBatch->schema();
+        TString strSchema = NArrow::SerializeSchema(*schema);
+        TString strBatch = NArrow::SerializeBatchNoCompression(srcBatch);
+
+        TInstant start = TInstant::Now();
+        {
+            auto res = client.BulkUpsert(tablePath,
+                NYdb::NTable::EDataFormat::ApacheArrow, strBatch, strSchema).GetValueSync();
+
+            Cerr << res.GetStatus() << Endl;
+            UNIT_ASSERT_EQUAL_C(res.GetStatus(), EStatus::SUCCESS, res.GetIssues().ToString());
+        }
+        Cerr << "Upsert done: " << TInstant::Now() - start << Endl;
+    }
+
     Y_UNIT_TEST(UpsertArrowBatch) {
         TKikimrWithGrpcAndRootSchema server(GetAppConfig());
         server.Server_->GetRuntime()->SetLogPriority(NKikimrServices::TX_COLUMNSHARD, NActors::NLog::PRI_DEBUG);
@@ -1024,7 +1083,7 @@ Y_UNIT_TEST_SUITE(YdbTableBulkUpsertOlap) {
 
             UNIT_ASSERT_EQUAL_C(res.GetStatus(), EStatus::SUCCESS, res.GetIssues().ToString());
         }
-    
+
         {
             auto rowsBuilder = NYdb::TValueBuilder();
             rowsBuilder.BeginList();
@@ -1044,7 +1103,7 @@ Y_UNIT_TEST_SUITE(YdbTableBulkUpsertOlap) {
                 .AddMember("dbl").OptionalDouble(1e+113)
                 .EndStruct();
             rowsBuilder.EndList();
-    
+
             auto result = client.BulkUpsert(tablePath, rowsBuilder.Build()).ExtractValueSync();
             UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), NYdb::EStatus::SUCCESS, result.GetIssues().ToString());
         }
@@ -1054,7 +1113,7 @@ Y_UNIT_TEST_SUITE(YdbTableBulkUpsertOlap) {
             auto schema = srcBatch->schema();
             TString strSchema = NArrow::SerializeSchema(*schema);
             TString strBatch = NArrow::SerializeBatchNoCompression(srcBatch);
-    
+
             auto res = client.BulkUpsert(tablePath,
                 NYdb::NTable::EDataFormat::ApacheArrow, strBatch, strSchema).GetValueSync();
 

@@ -8,6 +8,11 @@ TSettings::TColumnsDistributor::EColumnType TSettings::TColumnsDistributor::Take
     }
     PredSize = columnSize;
     if (Settings.GetColumnsLimit() <= SeparatedCount) {
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD)
+            ("event", "VLAD_other_1")
+            ("Settings.GetColumnsLimit()", Settings.GetColumnsLimit())
+            ("SeparatedCount", SeparatedCount)
+            ;
         return EColumnType::Other;
     }
     AFL_VERIFY(SumSize >= CurrentColumnsSize)("sum", SumSize)("columns", CurrentColumnsSize);
@@ -20,6 +25,19 @@ TSettings::TColumnsDistributor::EColumnType TSettings::TColumnsDistributor::Take
         ++SeparatedCount;
         return EColumnType::Separated;
     }
+
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)
+            ("event", "VLAD_other_2")
+            ("Settings.GetColumnsLimit()", Settings.GetColumnsLimit())
+            ("SeparatedCount", SeparatedCount)
+            ("sum", SumSize)
+            ("CurrentColumnsSize", CurrentColumnsSize)
+            ("RecordsCount", RecordsCount)
+            ("columnValuesCount", columnValuesCount)
+            ("Settings.GetSparsedDetectorKff()", Settings.GetSparsedDetectorKff())
+            ("Settings.GetOthersAllowedFraction()", Settings.GetOthersAllowedFraction())
+            ;
+
     return EColumnType::Other;
 }
 

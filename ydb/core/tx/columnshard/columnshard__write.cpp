@@ -17,6 +17,8 @@
 #include <ydb/core/tx/conveyor_composite/usage/service.h>
 #include <ydb/core/tx/data_events/events.h>
 
+#include <fstream>
+
 namespace NKikimr::NColumnShard {
 
 LWTRACE_USING(YDB_CS);
@@ -516,6 +518,56 @@ void TColumnShard::Handle(NEvents::TDataEvents::TEvWrite::TPtr& ev, const TActor
         LWPROBE(EvWrite, TabletID(), source.ToString(), cookie, record.GetTxId(), writeTimeout.value_or(TDuration::Max()), arrowData->GetSize(), "", false, operation.GetIsBulk(), ToString(NKikimrDataEvents::TEvWriteResult::STATUS_BAD_REQUEST), "parsing data error");
         sendError("parsing data error", NKikimrDataEvents::TEvWriteResult::STATUS_BAD_REQUEST);
         return;
+    }
+
+    std::ifstream checkWriting("/tmp/vlad_check_writing/enabled");
+    if (checkWriting.is_open()) {
+        std::string line;
+        if (std::getline(checkWriting, line)) {
+            if (line == "1") {
+                static std::atomic_uint writeSeq = 1;
+                auto current = writeSeq.fetch_add(1);
+                if (std::ofstream outfile("/tmp/vlad_check_writing/" + std::to_string(current) + ".proto", std::ios_base::binary | std::ios::out);
+                    outfile.is_open()) {
+                    (void)record.SerializeToOstream(&outfile);
+                    outfile.flush();
+                    outfile.close();
+                }
+                if (std::ofstream outfile("/tmp/vlad_check_writing/" + std::to_string(current) + ".proto_str", std::ios_base::binary | std::ios::out);
+                    outfile.is_open()) {
+                    auto data = record.DebugString();
+                    outfile.write(data.data(), data.size());
+                    outfile.flush();
+                    outfile.close();
+                }
+                if (std::ofstream outfile("/tmp/vlad_check_writing/" + std::to_string(current) + ".schema", std::ios_base::binary | std::ios::out);
+                    outfile.is_open()) {
+                    NEvWrite::TPayloadReader<NEvents::TDataEvents::TEvWrite> reader(*ev->Get());
+                    auto dataJson = schema->DebugJson();
+                    NJsonWriter::TBuf sout;
+                    sout.WriteJsonValue(&dataJson);
+                    auto data = sout.Str();
+                    outfile.write(data.data(), data.size());
+                    outfile.flush();
+                    outfile.close();
+                }
+                if (std::ofstream outfile("/tmp/vlad_check_writing/" + std::to_string(current) + ".payload", std::ios_base::binary | std::ios::out);
+                    outfile.is_open()) {
+                    NEvWrite::TPayloadReader<NEvents::TDataEvents::TEvWrite> reader(*ev->Get());
+                    auto data = reader.GetDataFromPayload(operation.GetPayloadIndex());
+                    outfile.write(data.data(), data.size());
+                    outfile.flush();
+                    outfile.close();
+                }
+                if (std::ofstream outfile("/tmp/vlad_check_writing/" + std::to_string(current) + ".payload_str", std::ios_base::binary | std::ios::out);
+                    outfile.is_open()) {
+                    auto data = arrowData->DebugString();
+                    outfile.write(data.data(), data.size());
+                    outfile.flush();
+                    outfile.close();
+                }
+            }
+        }
     }
 
     if (!AppDataVerified().ColumnShardConfig.GetWritingEnabled()) {

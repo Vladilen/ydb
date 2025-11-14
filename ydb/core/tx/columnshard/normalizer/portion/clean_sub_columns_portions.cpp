@@ -60,12 +60,56 @@ bool TCleanSubColumnsPortionsNormalizer::CheckPortion(const NColumnShard::TTable
 INormalizerTask::TPtr TCleanSubColumnsPortionsNormalizer::BuildTask(
     std::vector<TPortionDataAccessor>&& portions, std::shared_ptr<THashMap<ui64, ISnapshotSchema::TPtr>> schemas) const {
     std::vector<TPortionDataAccessor> subColumnsPortions;
+    std::vector<long> deletedTimestamps;
     AFL_VERIFY(schemas);
 
     for (auto&& portion : portions) {
+        if (portion.GetPortionInfo().HasRemoveSnapshot()) {
+             continue;
+        }
+        auto lpk = portion.GetPortionInfo().GetMeta().IndexKeyEnd();
+        bool added = false;
+        if (auto timestampIdx = lpk.GetSchema()->GetFieldIndex("timestamp"); timestampIdx != -1) {
+            if (auto val = lpk.GetScalar(timestampIdx); val && val->type) {
+                switch (val->type->id()) {
+                    case arrow::Type::TIMESTAMP: {
+                        auto timestamp_type = std::static_pointer_cast<arrow::TimestampType>(val->type);
+                        arrow::TimeUnit::type unit = timestamp_type->unit();
+                        if (unit == arrow::TimeUnit::MICRO) {
+                            auto v = std::dynamic_pointer_cast<arrow::TimestampScalar>(val);
+                            if (v && v->value < 1761951600000000l) {
+                                deletedTimestamps.push_back(v->value);
+                                subColumnsPortions.push_back(std::move(portion));
+                                added = true;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                    default:
+                        break;
+                }
+            }
+        }
+
+        if (added) {
+            continue;
+        }
+
         auto it = schemas->find(portion.GetPortionInfo().GetPortionId());
         AFL_VERIFY(it != schemas->end());
         const auto& indexInfo = it->second->GetIndexInfo();
+        for (auto&& j : portion.GetIndexesVerified()) {
+            if (!indexInfo.GetIndexNameOptional(j.GetEntityId())) {
+                subColumnsPortions.push_back(std::move(portion));
+                added = true;
+                break;
+            }
+        }
+        if (added) {
+            continue;
+        }
+
         for (ui32 i = 0; i < it->second->GetColumnsCount(); ++i) {
             auto loader = indexInfo.GetColumnLoaderOptional(i);
             if (loader && loader->GetAccessorConstructor()->GetClassName() == "SUB_COLUMNS") {
@@ -77,6 +121,7 @@ INormalizerTask::TPtr TCleanSubColumnsPortionsNormalizer::BuildTask(
     auto taskResult = std::make_shared<TNormalizerResult>(std::move(subColumnsPortions));
     ACFL_WARN("normalizer", "TCleanSubColumnsPortionsNormalizer")("message", taskResult->DebugString());
     ACFL_WARN("normalizer", "TCleanSubColumnsPortionsNormalizer")("all portions", portions.size());
+    ACFL_WARN("normalizer", "TCleanSubColumnsPortionsNormalizer")("deleted timestamps", JoinSeq(',', deletedTimestamps));
     return std::make_shared<TTrivialNormalizerTask>(taskResult);
 }
 

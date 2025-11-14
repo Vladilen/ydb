@@ -4,6 +4,7 @@
 
 #include <ydb/core/formats/arrow/accessor/composite_serial/accessor.h>
 #include <ydb/core/formats/arrow/accessor/plain/constructor.h>
+#include <ydb/core/formats/arrow/accessor/sub_columns/constructor.h>
 #include <ydb/core/formats/arrow/save_load/loader.h>
 #include <ydb/core/formats/arrow/size_calcer.h>
 #include <ydb/core/formats/arrow/splitter/simple.h>
@@ -110,6 +111,10 @@ TString TSubColumnsArray::SerializeToString(const TChunkConstructionData& extern
         so.Write(s.data(), s.size());
     }
     so.Finish();
+
+    NSubColumns::TConstructor c;
+    auto res = c.DeserializeFromString(result, externalInfo);
+
     return result;
 }
 

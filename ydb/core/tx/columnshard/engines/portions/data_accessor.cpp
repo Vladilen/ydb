@@ -162,6 +162,9 @@ void TPortionDataAccessor::FillBlobIdsByStorage(THashMap<TString, THashSet<TUnif
     for (auto&& i : GetIndexesVerified()) {
         if (!lastEntityId || *lastEntityId != i.GetEntityId()) {
             const TString& storageId = PortionInfo->GetIndexStorageId(i.GetEntityId(), indexInfo);
+            if (storageId == "__INVALID_STORAGE_ID") {
+                continue;
+            }
             lastEntityId = i.GetEntityId();
             if (storageId != lastStorageId) {
                 currentHashResult = &result[storageId];
