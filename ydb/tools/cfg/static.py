@@ -337,6 +337,10 @@ class StaticConfigGenerator(object):
     @property
     def table_service_config(self):
         return self.__cluster_details.get_service("table_service_config")
+    
+    @property
+    def comp_grouped_memory_limiter_config(self):
+        return self.__cluster_details.get_service("comp_grouped_memory_limiter_config")
 
     @property
     def column_shard_config(self):
@@ -523,6 +527,9 @@ class StaticConfigGenerator(object):
 
         if self.table_service_config:
             normalized_config["table_service_config"] = self.table_service_config
+
+        if self.comp_grouped_memory_limiter_config:
+            normalized_config["comp_grouped_memory_limiter_config"] = self.comp_grouped_memory_limiter_config
 
         if self.column_shard_config:
             normalized_config["column_shard_config"] = self.column_shard_config
