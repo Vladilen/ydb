@@ -202,14 +202,6 @@ private:
     const ui32 Size;
 
 public:
-    ui32 BitsSize() const {
-        return Size;
-    }
-
-    ui32 ValuesSize() const {
-        return Values.Size();
-    }
-
     TDynBitMap ExtractBits() {
         return std::move(Values);
     }
@@ -291,33 +283,16 @@ std::vector<std::shared_ptr<NChunks::TPortionIndexChunk>> TIndexMeta::DoBuildInd
     TNGrammBuilder builder(HashesCount, CaseSensitive);
 
     ui32 size = FilterSizeBytes * 8;
-    // if ((size & (size - 1)) == 0)
-    {
+    if ((size & (size - 1)) == 0) {
         ui32 recordsCountBase = RecordsCount;
         while (recordsCountBase < recordsCount && size * 2 <= TConstants::MaxFilterSizeBytes) {
             size <<= 1;
             recordsCountBase *= 2;
         }
+    } else {
+        size *= ((recordsCount <= RecordsCount) ? 1.0 : (1.0 * recordsCount / RecordsCount));
     }
-    // else {
-    //     size *= ((recordsCount <= RecordsCount) ? 1.0 : (1.0 * recordsCount / RecordsCount));
-    // }
-    ui32 size2 = FilterSizeBytes * 8 * ((recordsCount <= RecordsCount) ? 1.0 : (1.0 * recordsCount / RecordsCount));
-    ui32 size3 = std::bit_ceil(FilterSizeBytes * 8);
-    {
-        ui32 recordsCountBase = RecordsCount;
-        while (recordsCountBase < recordsCount && size3 * 2 <= TConstants::MaxFilterSizeBytes) {
-            size3 <<= 1;
-            recordsCountBase *= 2;
-        }
-    }
-    size3 = std::max<ui32>(16, size3);
-    size2 = std::max<ui32>(16, size2);
     size = std::max<ui32>(16, size);
-
-    Cerr << "VLAD SIZES: " << recordsCount << " / " << RecordsCount << "; size: " << size << "; size2: " << size2 << "; size3: " << size3 << Endl;
-    // AFL_VERIFY((size & (size - 1)) == 0)("size", size)("reason", "size is invalid because it is not a power of two");
-
     const auto doFillFilter = [&](auto& inserter) {
         for (reader.Start(); reader.IsCorrect();) {
             AFL_VERIFY(reader.GetColumnsCount() == 1);
@@ -338,28 +313,29 @@ std::vector<std::shared_ptr<NChunks::TPortionIndexChunk>> TIndexMeta::DoBuildInd
             reader.ReadNext(reader.begin()->GetCurrentChunk()->GetRecordsCount());
         }
     };
-
     TString indexData;
-    if (size == 1024) {
-        indexData = TBitmapDetector<1024>(this, 1024).Detector(doFillFilter);
-    } else if (size == 2048) {
-        indexData = TBitmapDetector<2048>(this, 2048).Detector(doFillFilter);
-    } else if (size == 4096) {
-        indexData = TBitmapDetector<4096>(this, 4096).Detector(doFillFilter);
-    } else if (size == 4096 * 2) {
-        indexData = TBitmapDetector<4096 * 2>(this, 4096 * 2).Detector(doFillFilter);
-    } else if (size == 4096 * 4) {
-        indexData = TBitmapDetector<4096 * 4>(this, 4096 * 4).Detector(doFillFilter);
-    } else if (size == 4096 * 8) {
-        indexData = TBitmapDetector<4096 * 8>(this, 4096 * 8).Detector(doFillFilter);
-    } else if (size == 4096 * 16) {
-        indexData = TBitmapDetector<4096 * 16>(this, 4096 * 16).Detector(doFillFilter);
-    } else {
+    if ((size & (size - 1)) == 0) {
+        if (size == 1024) {
+            indexData = TBitmapDetector<1024>(this, 1024).Detector(doFillFilter);
+        } else if (size == 2048) {
+            indexData = TBitmapDetector<2048>(this, 2048).Detector(doFillFilter);
+        } else if (size == 4096) {
+            indexData = TBitmapDetector<4096>(this, 4096).Detector(doFillFilter);
+        } else if (size == 4096 * 2) {
+            indexData = TBitmapDetector<4096 * 2>(this, 4096 * 2).Detector(doFillFilter);
+        } else if (size == 4096 * 4) {
+            indexData = TBitmapDetector<4096 * 4>(this, 4096 * 4).Detector(doFillFilter);
+        } else if (size == 4096 * 8) {
+            indexData = TBitmapDetector<4096 * 8>(this, 4096 * 8).Detector(doFillFilter);
+        } else if (size == 4096 * 16) {
+            indexData = TBitmapDetector<4096 * 16>(this, 4096 * 16).Detector(doFillFilter);
+        }
+    }
+    if (!indexData) {
         TVectorInserter inserter(size);
         doFillFilter(inserter);
         indexData = GetBitsStorageConstructor()->Build(inserter.ExtractBits())->SerializeToString();
     }
-
     return { std::make_shared<NChunks::TPortionIndexChunk>(TChunkAddress(GetIndexId(), 0), recordsCount, indexData.size(), indexData) };
 }
 

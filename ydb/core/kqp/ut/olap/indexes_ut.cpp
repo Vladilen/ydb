@@ -383,26 +383,93 @@ Y_UNIT_TEST_SUITE(KqpOlapIndexes) {
             auto it = tableClient.StreamExecuteScanQuery(text).GetValueSync();
             UNIT_ASSERT_C(it.IsSuccess(), it.GetIssues().ToString());
             TString result = StreamResultToYson(it);
-            AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("result", result)("expected", expectedResult);
-            auto* controller = NYDBTest::TControllers::GetControllerAs<NOlap::TWaitCompactionController>();
-            AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("skip", controller->GetIndexesSkippingOnSelect().Val() - SkipStart)(
-                "check", controller->GetIndexesApprovedOnSelect().Val() - ApproveStart)(
-                "no_data", controller->GetIndexesSkippedNoData().Val() - NoDataStart);
+            // AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("result", result)("expected", expectedResult);
+            // auto* controller = NYDBTest::TControllers::GetControllerAs<NOlap::TWaitCompactionController>();
+            // AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("skip", controller->GetIndexesSkippingOnSelect().Val() - SkipStart)(
+            //     "check", controller->GetIndexesApprovedOnSelect().Val() - ApproveStart)(
+            //     "no_data", controller->GetIndexesSkippedNoData().Val() - NoDataStart);
             CompareYson(result, expectedResult);
         }
 
     public:
         TTestIndexesScenario& Initialize() {
-            Settings = TKikimrSettings().SetWithSampleTables(false);
+            Settings = TKikimrSettings().SetWithSampleTables(false)
+                .SetColumnShardAlterObjectEnabled(true);
+                // .SetColumnShardPeriodicWakeupActivationPeriodMs(1000);
             Settings.AppConfig.MutableColumnShardConfig()->SetReaderClassName("SIMPLE");
             Kikimr = std::make_unique<TKikimrRunner>(Settings);
             return *this;
         }
 
-        void Execute(const TString& indexesConfig) {
+        void Execute2() {
             auto csController = NYDBTest::TControllers::RegisterCSControllerGuard<NOlap::TWaitCompactionController>();
             csController->SetOverrideMemoryLimitForPortionReading(1e+10);
             csController->SetOverrideBlobSplitSettings(NOlap::NSplitter::TSplitSettings());
+            csController->SetCompactionControl(NYDBTest::EOptimizerCompactionWeightControl::Disable);
+            TLocalHelper(*Kikimr).CreateTestOlapStandaloneTable();
+            auto tableClient = Kikimr->GetTableClient();
+
+            WriteTestData(*Kikimr, "/Root/olapTable", 1000000, 300000000, 10000);
+
+            {
+                auto alterQuery =
+                    TStringBuilder() <<
+                    R"(ALTER TABLE `/Root/olapTable` ADD COLUMN checkIndexesColumn Utf8;)";
+                auto session = tableClient.CreateSession().GetValueSync().GetSession();
+                auto alterResult = session.ExecuteSchemeQuery(alterQuery).GetValueSync();
+                UNIT_ASSERT_VALUES_EQUAL_C(alterResult.GetStatus(), NYdb::EStatus::SUCCESS, alterResult.GetIssues().ToString());
+            }
+            {
+                auto alterQuery =
+                    TStringBuilder() <<
+                    R"(
+                    ALTER OBJECT `/Root/olapTable`
+                    (TYPE TABLE)
+                    SET (ACTION=UPSERT_INDEX, NAME=index_ngramm_checkIndexesColumn, TYPE=BLOOM_NGRAMM_FILTER,
+                        FEATURES=`{"column_name" : "checkIndexesColumn", "ngramm_size" : 3, "hashes_count" : 2, "filter_size_bytes" : 512,
+                                    "records_count" : 3000, "case_sensitive" : false,
+                                    "data_extractor" : {"class_name" : "DEFAULT"}, "bits_storage_type": "SIMPLE_STRING"}`);
+                    )";
+                auto session = tableClient.CreateSession().GetValueSync().GetSession();
+                auto alterResult = session.ExecuteSchemeQuery(alterQuery).GetValueSync();
+                UNIT_ASSERT_VALUES_EQUAL_C(alterResult.GetStatus(), NYdb::EStatus::SUCCESS, alterResult.GetIssues().ToString());
+            }
+
+            {
+                auto alterQuery =
+                    TStringBuilder() <<
+                    R"(ALTER OBJECT `/Root/olapTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `COMPACTION_PLANNER.CLASS_NAME`=`lc-buckets`, `COMPACTION_PLANNER.FEATURES`=`
+                  {"levels" : [{"class_name" : "Zero", "portions_live_duration" : "10s", "expected_blobs_size" : 2048000, "portions_count_available" : 1},
+                               {"class_name" : "Zero"}]}`);
+                )";
+                auto session = tableClient.CreateSession().GetValueSync().GetSession();
+                auto alterResult = session.ExecuteSchemeQuery(alterQuery).GetValueSync();
+                UNIT_ASSERT_VALUES_EQUAL_C(alterResult.GetStatus(), NYdb::EStatus::SUCCESS, alterResult.GetIssues().ToString());
+            }
+
+            csController->SetCompactionControl(NYDBTest::EOptimizerCompactionWeightControl::Force);
+            UNIT_ASSERT(csController->WaitCompactions(TDuration::Seconds(30), 3));
+
+            {
+                ExecuteSQL(R"(
+                PRAGMA OptimizeSimpleILIKE;
+                PRAGMA AnsiLike;
+                PRAGMA Kikimr.OptEnableOlapPushdownAggregate = "true";
+                    SELECT COUNT(*)
+                    FROM `/Root/olapTable`
+                    WHERE checkIndexesColumn = "5")",
+                    "[[0u;]]");
+                UNIT_ASSERT_VALUES_EQUAL(csController->GetIndexesSkippedNoData().Val() + csController->GetIndexesSkippingOnSelect().Val(), 3);
+                UNIT_ASSERT_VALUES_EQUAL(csController->GetIndexesApprovedOnSelect().Val(), 0);
+            }
+        }
+
+
+        void Execute(const TString& indexesConfig, const TString& like) {
+            auto csController = NYDBTest::TControllers::RegisterCSControllerGuard<NOlap::TWaitCompactionController>();
+            csController->SetOverrideMemoryLimitForPortionReading(1e+10);
+            csController->SetOverrideBlobSplitSettings(NOlap::NSplitter::TSplitSettings());
+            csController->SetCompactionControl(NYDBTest::EOptimizerCompactionWeightControl::Disable);
             TLocalHelper(*Kikimr).CreateTestOlapTable();
             auto tableClient = Kikimr->GetTableClient();
 
@@ -492,9 +559,10 @@ Y_UNIT_TEST_SUITE(KqpOlapIndexes) {
             AFL_VERIFY(csController->GetIndexesSkippedNoData().Val() == 0)("val", csController->GetIndexesSkippedNoData().Val());
             AFL_VERIFY(csController->GetIndexesSkippingOnSelect().Val() == 0);
             AFL_VERIFY(csController->GetIndexesApprovedOnSelect().Val() == 0);
-            csController->WaitCompactions(TDuration::Seconds(5));
+            csController->SetCompactionControl(NYDBTest::EOptimizerCompactionWeightControl::Force);
+            UNIT_ASSERT(csController->WaitCompactions(TDuration::Seconds(30), 3));
             // important checker for control compactions (<=21) and control indexes constructed (>=21)
-            AFL_VERIFY(csController->GetCompactionStartedCounter().Val() >= 3)("count", csController->GetCompactionStartedCounter().Val());
+            // AFL_VERIFY(csController->GetCompactionStartedCounter().Val() >= 3)("count", csController->GetCompactionStartedCounter().Val());
 
             {
                 ExecuteSQL(R"(
@@ -503,11 +571,11 @@ Y_UNIT_TEST_SUITE(KqpOlapIndexes) {
                 PRAGMA Kikimr.OptEnableOlapPushdownAggregate = "true";
                     SELECT COUNT(*)
                     FROM `/Root/olapStore/olapTable`
-                    WHERE resource_id LIKE '%110a151' AND resource_id LIKE '110a%' AND resource_id LIKE '%dd%')",
+                    WHERE resource_id )" + like + R"( '%110a151' AND resource_id )" + like + R"( '110a%' AND resource_id )" + like + R"( '%dd%')",
                     "[[0u;]]");
                 AFL_VERIFY(csController->GetIndexesSkippedNoData().Val() == 0)("val", csController->GetIndexesSkippedNoData().Val());
-                // AFL_VERIFY(!csController->GetIndexesApprovedOnSelect().Val());
-                // AFL_VERIFY(csController->GetIndexesSkippingOnSelect().Val());
+                AFL_VERIFY(!csController->GetIndexesApprovedOnSelect().Val());
+                AFL_VERIFY(csController->GetIndexesSkippingOnSelect().Val());
             }
             {
                 ResetZeroLevel(csController);
@@ -517,11 +585,11 @@ Y_UNIT_TEST_SUITE(KqpOlapIndexes) {
                 PRAGMA Kikimr.OptEnableOlapPushdownAggregate = "true";
                     SELECT COUNT(*)
                     FROM `/Root/olapStore/olapTable`
-                    WHERE resource_id LIKE '%110a151%')",
+                    WHERE resource_id )" + like + R"( '%110a151%')",
                     "[[0u;]]");
                 AFL_VERIFY(csController->GetIndexesSkippedNoData().Val() == 0)("val", csController->GetIndexesSkippedNoData().Val());
-                // AFL_VERIFY(!csController->GetIndexesApprovedOnSelect().Val());
-                // AFL_VERIFY(csController->GetIndexesSkippingOnSelect().Val() - SkipStart >= 3);
+                AFL_VERIFY(!csController->GetIndexesApprovedOnSelect().Val());
+                AFL_VERIFY(csController->GetIndexesSkippingOnSelect().Val() - SkipStart >= 3);
             }
             {
                 ResetZeroLevel(csController);
@@ -531,7 +599,7 @@ Y_UNIT_TEST_SUITE(KqpOlapIndexes) {
                 PRAGMA Kikimr.OptEnableOlapPushdownAggregate = "true";
                     SELECT COUNT(*)
                     FROM `/Root/olapStore/olapTable`
-                    WHERE ((resource_id = '2' AND level = 222222) OR (resource_id = '1' AND level = 111111) OR (resource_id LIKE '%11dd%')) AND uid = '222')",
+                    WHERE ((resource_id = '2' AND level = 222222) OR (resource_id = '1' AND level = 111111) OR (resource_id )" + like + R"( '%11dd%')) AND uid = '222')",
                     "[[0u;]]");
 
                 AFL_VERIFY(csController->GetIndexesSkippedNoData().Val() == 0)("val", csController->GetIndexesSkippedNoData().Val());
@@ -573,7 +641,7 @@ Y_UNIT_TEST_SUITE(KqpOlapIndexes) {
                         sb << enablePushdownOlapAggregation << Endl;
                         sb << "SELECT COUNT(*) FROM `/Root/olapStore/olapTable`" << Endl;
                         sb << "WHERE" << Endl;
-                        sb << "resource_id LIKE '%" << res << "%'" << Endl;
+                        sb << "resource_id " << like << " '%" << res << "%'" << Endl;
                         return sb;
                     };
                     ExecuteSQL(query(resourceIds[idx]), "[[1u;]]");
@@ -592,7 +660,7 @@ Y_UNIT_TEST_SUITE(KqpOlapIndexes) {
                         sb << enablePushdownOlapAggregation << Endl;
                         sb << "SELECT COUNT(*) FROM `/Root/olapStore/olapTable`" << Endl;
                         sb << "WHERE" << Endl;
-                        sb << "resource_id ILIKE '" << res << "%'" << Endl;
+                        sb << "resource_id " << like << " '" << res << "%'" << Endl;
                         return sb;
                     };
                     ExecuteSQL(query(resourceIds[idx]), "[[1u;]]");
@@ -611,7 +679,7 @@ Y_UNIT_TEST_SUITE(KqpOlapIndexes) {
                         sb << enablePushdownOlapAggregation << Endl;
                         sb << "SELECT COUNT(*) FROM `/Root/olapStore/olapTable`" << Endl;
                         sb << "WHERE" << Endl;
-                        sb << "resource_id ILIKE '%" << res << "'" << Endl;
+                        sb << "resource_id " << like << " '%" << res << "'" << Endl;
                         return sb;
                     };
                     ExecuteSQL(query(resourceIds[idx]), "[[1u;]]");
@@ -626,23 +694,36 @@ Y_UNIT_TEST_SUITE(KqpOlapIndexes) {
     //|256|4096|65536|1048576
     //|129|150|331|512|10000
     TString scriptDifferentIndexesConfig = R"(ALTER OBJECT `/Root/olapStore` (TYPE TABLESTORE) SET (ACTION=UPSERT_INDEX, NAME=index_ngramm_uid, TYPE=BLOOM_NGRAMM_FILTER,
-        FEATURES=`{"column_name" : "resource_id", "ngramm_size" : $$3|4|5|6|7|8$$, "hashes_count" : $$1|2|3|4|5|6|7|8$$,
-                   "filter_size_bytes" : $$129|131|137|257|397$$,
+        FEATURES=`{"column_name" : "resource_id", "ngramm_size" : $$3|8$$, "hashes_count" : $$1|5|8$$,
+                   "filter_size_bytes" : $$128|129|131|255|256|257|4095|4096|4097$$,
                    "records_count" : $$128|331|1879$$, "case_sensitive": $$false|true$$,
                    "data_extractor" : {"class_name" : "DEFAULT"}, "bits_storage_type": "$$SIMPLE_STRING|BITSET$$"}`);
     )";
-    Y_UNIT_TEST_STRING_VARIATOR(DifferentIndexesConfig, scriptDifferentIndexesConfig) {
-        TTestIndexesScenario().SetStorageId("__DEFAULT").Initialize().Execute(__SCRIPT_CONTENT);
-        // Variator::ToExecutor(Variator::SingleScript(__SCRIPT_CONTENT)).Execute();
+
+    Y_UNIT_TEST_STRING_VARIATOR(DifferentIndexesConfigDefaultLike, scriptDifferentIndexesConfig) {
+        TTestIndexesScenario().SetStorageId("__DEFAULT").Initialize().Execute(__SCRIPT_CONTENT, "LIKE");
+    }
+    Y_UNIT_TEST_STRING_VARIATOR(DifferentIndexesConfigLocalLike, scriptDifferentIndexesConfig) {
+        TTestIndexesScenario().SetStorageId("__LOCAL_METADATA").Initialize().Execute(__SCRIPT_CONTENT, "LIKE");
     }
 
-    // Y_UNIT_TEST(IndexesInBS) {
-    //     TTestIndexesScenario().SetStorageId("__DEFAULT").Initialize().Execute();
-    // }
+    TString scriptDifferentIndexesConfigIlike = R"(ALTER OBJECT `/Root/olapStore` (TYPE TABLESTORE) SET (ACTION=UPSERT_INDEX, NAME=index_ngramm_uid, TYPE=BLOOM_NGRAMM_FILTER,
+        FEATURES=`{"column_name" : "resource_id", "ngramm_size" : $$3|8$$, "hashes_count" : $$1|5|8$$,
+                   "filter_size_bytes" : $$128|129|131|255|256|257|4095|4096|4097$$,
+                   "records_count" : $$128|331|1879$$, "case_sensitive": $$false$$,
+                   "data_extractor" : {"class_name" : "DEFAULT"}, "bits_storage_type": "$$SIMPLE_STRING|BITSET$$"}`);
+    )";
 
-    // Y_UNIT_TEST(IndexesInLocalMetadata) {
-    //     TTestIndexesScenario().SetStorageId("__LOCAL_METADATA").Initialize().Execute();
-    // }
+    Y_UNIT_TEST_STRING_VARIATOR(DifferentIndexesConfigDefaultIlike, scriptDifferentIndexesConfigIlike) {
+        TTestIndexesScenario().SetStorageId("__DEFAULT").Initialize().Execute(__SCRIPT_CONTENT, "ILIKE");
+    }
+    Y_UNIT_TEST_STRING_VARIATOR(DifferentIndexesConfigLocalIlike, scriptDifferentIndexesConfigIlike) {
+        TTestIndexesScenario().SetStorageId("__LOCAL_METADATA").Initialize().Execute(__SCRIPT_CONTENT, "ILIKE");
+    }
+
+    Y_UNIT_TEST(CheckCompactionFailingOnIndexes) {
+        TTestIndexesScenario().SetStorageId("__DEFAULT").Initialize().Execute2();
+    }
 
     Y_UNIT_TEST(IndexesModificationError) {
         auto settings = TKikimrSettings().SetWithSampleTables(false);
