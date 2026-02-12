@@ -27,7 +27,7 @@ private:
         sb << "VIEW index_by_secret_id" << Endl;
         sb << "WHERE " + TSecret::TDecoder::SecretId + " IN (" + JoinStrings(secretNameLiterals.begin(), secretNameLiterals.end(), ", ") + ")"
            << Endl;
-        AFL_DEBUG(NKikimrServices::METADATA_SECRET)("event", "build_precondition")("sql", sb);
+        AFL_ERROR(NKikimrServices::METADATA_SECRET)("event", "build_precondition")("sql", sb);
         request.mutable_query()->set_yql_text(sb);
         return request;
     }

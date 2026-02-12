@@ -18,6 +18,7 @@ private:
     YDB_READONLY_DEF(TIdsByName, IndexByName);
 private:
     void BuildIndex();
+    void Save(TStringBuf info) const;
 protected:
     virtual bool DoDeserializeFromResultSet(const Ydb::Table::ExecuteQueryResult& rawData) override;
     virtual TString DoSerializeToString() const override;

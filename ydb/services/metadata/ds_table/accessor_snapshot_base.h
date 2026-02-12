@@ -82,6 +82,8 @@ private:
     const NRequest::TConfig Config;
     std::map<TString, TTableInfo> ExistenceChecks;
     std::map<TString, TTableInfo> CurrentExistence;
+    static std::atomic_int CUR;
+    const int CURRENT = CUR.fetch_add(1);
     void StartSnapshotsFetchingImpl();
 protected:
     std::shared_ptr<TRefreshInternalController> InternalController;
@@ -114,7 +116,7 @@ public:
             hFunc(TTableExistsActor::TEvController::TEvError, Handle);
             hFunc(TTableExistsActor::TEvController::TEvResult, Handle);
             hFunc(TEvRecheckExistence, Handle);
-            
+
             default:
                 break;
         }

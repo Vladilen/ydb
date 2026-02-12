@@ -1,5 +1,10 @@
 #include "snapshot.h"
 
+#include <atomic>
+#include <fstream>
+
+static std::atomic_int iii = 0;
+
 namespace NKikimr::NMetadata::NSecret {
 
 void TSnapshot::BuildIndex() {
@@ -9,11 +14,35 @@ void TSnapshot::BuildIndex() {
     }
 }
 
+void TSnapshot::Save(TStringBuf info) const {
+    AFL_ERROR(NKikimrServices::TX_TIERING)("event", "VLAD Save")("info", info);
+
+    auto current = iii.fetch_add(1);
+    std::ofstream outFile(std::string("/tmp/llll/") + std::to_string(current));
+    if (outFile.is_open()) {
+        TStringBuilder sb;
+        sb << info << Endl;
+        sb << "SECRETS:" << Endl;
+        for (auto&& i : Secrets) {
+            sb << i.first.GetOwnerUserId() << ":" << i.first.GetSecretId() << ";" << Endl;
+        }
+        sb << "ACCESS:" << Endl;
+        for (auto&& i : Access) {
+            sb << i.GetOwnerUserId() << ":" << i.GetSecretId() << ":" << i.GetAccessSID() << ";" << Endl;
+        }
+        outFile << sb;
+        outFile.close();
+    }
+}
+
 bool TSnapshot::DoDeserializeFromResultSet(const Ydb::Table::ExecuteQueryResult& rawDataResult) {
     Y_ABORT_UNLESS(rawDataResult.result_sets().size() == 2);
     ParseSnapshotObjects<TSecret>(rawDataResult.result_sets()[0], [this](TSecret&& s) {Secrets.emplace(s, s); });
     ParseSnapshotObjects<TAccess>(rawDataResult.result_sets()[1], [this](TAccess&& s) {Access.emplace_back(std::move(s)); });
     BuildIndex();
+
+    Save("DoDeserializeFromResultSet");
+
     return true;
 }
 
@@ -90,6 +119,7 @@ bool TSnapshot::CheckSecretAccess(const TSecretIdOrValue& sIdOrValue, const NACL
 }
 
 TConclusion<TString> TSnapshot::GetSecretValue(const TSecretIdOrValue& sId) const {
+    Save("GetSecretValue");
     return std::visit(TOverloaded(
         [](std::monostate) -> TConclusion<TString>{
             return TConclusionStatus::Fail("Empty secret id");
@@ -120,6 +150,7 @@ TConclusion<TString> TSnapshot::GetSecretValue(const TSecretIdOrValue& sId) cons
 }
 
 std::vector<TSecretId> TSnapshot::GetSecretIds(const std::optional<NACLib::TUserToken>& userToken, const TString& secretId) const {
+    Save("GetSecretIds");
     std::vector<TSecretId> secretIds;
     for (const auto& [key, value]: Secrets) {
         if (key.GetSecretId() != secretId) {

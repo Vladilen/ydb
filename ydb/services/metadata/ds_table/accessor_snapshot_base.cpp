@@ -8,6 +8,8 @@
 
 namespace NKikimr::NMetadata::NProvider {
 
+std::atomic_int TDSAccessorBase::CUR {0};
+
 void TDSAccessorBase::OnNewParsedSnapshot(Ydb::Table::ExecuteQueryResult&& /*qResult*/, NFetcher::ISnapshot::TPtr snapshot) {
     SnapshotConstructor->EnrichSnapshotData(snapshot, InternalController);
 }
@@ -17,10 +19,13 @@ void TDSAccessorBase::OnConstructSnapshotError(const TString& errorMessage) {
 }
 
 void TDSAccessorBase::Handle(NRequest::TEvRequestFailed::TPtr& ev) {
+    AFL_ERROR(NKikimrServices::METADATA_SECRET)("event", "VLAD SELECT RESULT ERROR")("CURRENT", CURRENT);
     OnConstructSnapshotError("on request failed: " + ev->Get()->GetErrorMessage());
 }
 
 void TDSAccessorBase::Handle(NRequest::TEvRequestResult<NRequest::TDialogYQLRequest>::TPtr& ev) {
+    AFL_ERROR(NKikimrServices::METADATA_SECRET)("event", "VLAD SELECT RESULT")("CURRENT", CURRENT);
+
     auto& currentFullReply = ev->Get()->GetResult();
     Ydb::Table::ExecuteQueryResult qResult;
     currentFullReply.operation().result().UnpackTo(&qResult);
@@ -133,8 +138,12 @@ void TDSAccessorBase::StartSnapshotsFetchingImpl() {
         Y_ABORT_UNLESS(it->second.State != EState::UNKNOWN);
         if (it->second.State == EState::EXISTS) {
             sb << "SELECT * FROM `" + EscapeC(i->GetStorageTablePath()) + "`;" << Endl;
+        } else {
+            AFL_ERROR(NKikimrServices::METADATA_SECRET)("event", "VLAD SELECT NOT EXIST")("path", i->GetStorageTablePath());
         }
     }
+    AFL_ERROR(NKikimrServices::METADATA_SECRET)("event", "VLAD SELECT")("query", sb)("CURRENT", CURRENT);
+
     NRequest::TYQLRequestExecutor::Execute(sb, NACLib::TSystemUsers::Metadata(), InternalController, true);
 }
 

@@ -48,8 +48,12 @@ std::unique_ptr<NActors::IEventBase> TRepliesAdapter::RebuildReplyEvent(
         TString err = TStringBuilder() << ev->GetError().GetExceptionName() << ", " << ev->GetError().GetMessage();
         ErrorCollector->OnWriteError(StorageId, err);
 
-        return std::make_unique<TEvBlobStorage::TEvPutResult>(
+        auto result = std::make_unique<TEvBlobStorage::TEvPutResult>(
             NKikimrProto::EReplyStatus::ERROR, logoBlobId, 0, TGroupId::FromValue(Max<ui32>()), 0, StorageId);
+
+        result->ErrorReason = err;
+
+        return result;
     }
 }
 
