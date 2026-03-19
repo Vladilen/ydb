@@ -41,7 +41,7 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
             PRIMARY KEY (pk_int)
         )
         PARTITION BY HASH(pk_int)
-        WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1);
+        WITH (STORE = COLUMN, PARTITION_COUNT = 1);
         ------
         SCHEMA:
         ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `COMPACTION_PLANNER.CLASS_NAME`=`l-buckets`)
@@ -96,7 +96,7 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
             PRIMARY KEY (Col1)
         )
         PARTITION BY HASH(Col1)
-        WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = $$1|2|10$$);
+        WITH (STORE = COLUMN, PARTITION_COUNT = $$1|2|10$$);
         ------
         SCHEMA:
         ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `SCAN_READER_POLICY_NAME`=`SIMPLE`)
@@ -128,7 +128,7 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
             PRIMARY KEY (Col1)
         )
         PARTITION BY HASH(Col1)
-        WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = $$1|2$$);
+        WITH (STORE = COLUMN, PARTITION_COUNT = $$1|2$$);
         ------
         SCHEMA:
         ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `COMPACTION_PLANNER.CLASS_NAME`=`l-buckets`)
@@ -181,7 +181,7 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
             PRIMARY KEY (pk, otherPk)
         )
         PARTITION BY HASH(pk, otherPk)
-        WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1);
+        WITH (STORE = COLUMN, PARTITION_COUNT = 1);
         ------
         SCHEMA:
         ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `SCAN_READER_POLICY_NAME`=`SIMPLE`)
@@ -289,7 +289,7 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
             PRIMARY KEY (pk, otherPk)
         )
         PARTITION BY HASH(pk, otherPk)
-        WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1);
+        WITH (STORE = COLUMN, PARTITION_COUNT = 1);
         ------
         SCHEMA:
         ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `SCAN_READER_POLICY_NAME`=`SIMPLE`)
@@ -415,7 +415,7 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
             PRIMARY KEY (pk, otherPk)
         )
         PARTITION BY HASH(pk, otherPk)
-        WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1);
+        WITH (STORE = COLUMN, PARTITION_COUNT = 1);
         ------
         SCHEMA:
         ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `SCAN_READER_POLICY_NAME`=`SIMPLE`)
@@ -524,7 +524,7 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
             PRIMARY KEY (pk)
         )
         PARTITION BY HASH(pk)
-        WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1);
+        WITH (STORE = COLUMN, PARTITION_COUNT = 1);
         ------
         SCHEMA:
         ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `SCAN_READER_POLICY_NAME`=`SIMPLE`)
@@ -574,6 +574,76 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
         Variator::ToExecutor(Variator::SingleScript(scriptGroupBySomeDoubleNullInsert)).Execute();
     }
 
+    TString scriptAddDictColumnThenUpsertSamePk = R"(
+        STOP_COMPACTION
+        ------
+        SCHEMA:
+        CREATE TABLE `/Root/ColumnTable` (
+            pk Uint64 NOT NULL,
+            PRIMARY KEY (pk)
+        )
+        PARTITION BY HASH(pk)
+        WITH (STORE = COLUMN, PARTITION_COUNT = 1);
+        ------
+        SCHEMA:
+        ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `SCAN_READER_POLICY_NAME`=`SIMPLE`)
+        ------
+        DATA:
+        REPLACE INTO `/Root/ColumnTable` (pk) VALUES (100u);
+        ------
+        SCHEMA:
+        ALTER TABLE `/Root/ColumnTable` ADD COLUMN extra Utf8
+        ------
+        SCHEMA:
+        ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=ALTER_COLUMN, NAME=extra, `DATA_ACCESSOR_CONSTRUCTOR.CLASS_NAME`=`DICTIONARY`)
+        ------
+        DATA:
+        REPLACE INTO `/Root/ColumnTable` (pk, extra) VALUES (100u, 'post_add');
+        ------
+        ONE_COMPACTION
+        ------
+        READ: SELECT pk, extra FROM `/Root/ColumnTable` ORDER BY pk;
+        EXPECTED: [[100u;["post_add"]]]
+    )";
+    Y_UNIT_TEST(AddDictionaryColumnThenUpsertSamePkAndCompact) {
+        Variator::ToExecutor(Variator::SingleScript(scriptAddDictColumnThenUpsertSamePk)).Execute();
+    }
+
+    TString scriptAddDictColumnThenUpsertOtherPk = R"(
+        STOP_COMPACTION
+        ------
+        SCHEMA:
+        CREATE TABLE `/Root/ColumnTable` (
+            pk Uint64 NOT NULL,
+            PRIMARY KEY (pk)
+        )
+        PARTITION BY HASH(pk)
+        WITH (STORE = COLUMN, PARTITION_COUNT = 1);
+        ------
+        SCHEMA:
+        ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `SCAN_READER_POLICY_NAME`=`SIMPLE`)
+        ------
+        DATA:
+        REPLACE INTO `/Root/ColumnTable` (pk) VALUES (200u);
+        ------
+        SCHEMA:
+        ALTER TABLE `/Root/ColumnTable` ADD COLUMN extra Utf8
+        ------
+        SCHEMA:
+        ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=ALTER_COLUMN, NAME=extra, `DATA_ACCESSOR_CONSTRUCTOR.CLASS_NAME`=`DICTIONARY`)
+        ------
+        DATA:
+        REPLACE INTO `/Root/ColumnTable` (pk, extra) VALUES (201u, 'only_new_pk');
+        ------
+        ONE_COMPACTION
+        ------
+        READ: SELECT pk, extra FROM `/Root/ColumnTable` ORDER BY pk;
+        EXPECTED: [[200u;#];[201u;["only_new_pk"]]]
+    )";
+    Y_UNIT_TEST(AddDictionaryColumnThenUpsertOtherPkAndCompact) {
+        Variator::ToExecutor(Variator::SingleScript(scriptAddDictColumnThenUpsertOtherPk)).Execute();
+    }
+
     TString scriptDeleteOneDictionaryValue = R"(
         STOP_COMPACTION
         ------
@@ -584,7 +654,7 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
             PRIMARY KEY (pk)
         )
         PARTITION BY HASH(pk)
-        WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1);
+        WITH (STORE = COLUMN, PARTITION_COUNT = 1);
         ------
         SCHEMA:
         ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `SCAN_READER_POLICY_NAME`=`SIMPLE`)
@@ -632,6 +702,64 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
         Variator::ToExecutor(Variator::SingleScript(scriptDeleteOneDictionaryValue)).Execute();
     }
 
+    TString scriptDeleteOneFullDictionaryValue = R"(
+        STOP_COMPACTION
+        ------
+        SCHEMA:
+        CREATE TABLE `/Root/ColumnTable` (
+            pk Uint64 NOT NULL,
+            message Utf8,
+            PRIMARY KEY (pk)
+        )
+        PARTITION BY HASH(pk)
+        WITH (STORE = COLUMN, PARTITION_COUNT = 1);
+        ------
+        SCHEMA:
+        ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `SCAN_READER_POLICY_NAME`=`SIMPLE`)
+        ------
+        SCHEMA:
+        ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=ALTER_COLUMN, NAME=message, `DATA_ACCESSOR_CONSTRUCTOR.CLASS_NAME`=`DICTIONARY`)
+        ------
+        DATA:
+        REPLACE INTO `/Root/ColumnTable` (pk, message) VALUES
+            (1u, 'a'),
+            (2u, 'b'),
+            (3u, 'a'),
+            (4u, NULL);
+        ------
+        CHECK_COUNTER: Deriviative/Dictionary/OnlyOptimization/Count
+        PATH: tablets/subsystem/columnshard/module_id/Scan
+        EXPECTED: 0
+        ------
+        DATA:
+        DELETE FROM `/Root/ColumnTable` WHERE pk = 2;
+        ------
+        READ: SELECT pk, message FROM `/Root/ColumnTable` ORDER BY pk;
+        EXPECTED: [[1u;["a"]];[3u;["a"]];[4u;#]]
+        ------
+        READ: PRAGMA Kikimr.OptEnableOlapPushdownAggregate = "true"; SELECT SOME(message) FROM `/Root/ColumnTable` GROUP BY message;
+        EXPECTED_UNORDERED: [[#];[["a"]]]
+        ------
+        CHECK_COUNTER: Deriviative/Dictionary/OnlyOptimization/Count
+        PATH: tablets/subsystem/columnshard/module_id/Scan
+        EXPECTED: 0
+        ------
+        ONE_COMPACTION
+        ------
+        READ: SELECT pk, message FROM `/Root/ColumnTable` ORDER BY pk;
+        EXPECTED: [[1u;["a"]];[3u;["a"]];[4u;#]]
+        ------
+        READ: PRAGMA Kikimr.OptEnableOlapPushdownAggregate = "true"; SELECT SOME(message) FROM `/Root/ColumnTable` GROUP BY message;
+        EXPECTED_UNORDERED: [[#];[["a"]]]
+        ------
+        CHECK_COUNTER: Deriviative/Dictionary/OnlyOptimization/Count
+        PATH: tablets/subsystem/columnshard/module_id/Scan
+        EXPECTED: 1
+    )";
+    Y_UNIT_TEST(DeleteDictionaryOneFullDictionaryValue) {
+        Variator::ToExecutor(Variator::SingleScript(scriptDeleteOneFullDictionaryValue)).Execute();
+    }
+
     TString scriptDeleteOneNullDictionaryValue = R"(
         STOP_COMPACTION
         ------
@@ -642,7 +770,7 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
             PRIMARY KEY (pk)
         )
         PARTITION BY HASH(pk)
-        WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1);
+        WITH (STORE = COLUMN, PARTITION_COUNT = 1);
         ------
         SCHEMA:
         ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `SCAN_READER_POLICY_NAME`=`SIMPLE`)
@@ -696,7 +824,7 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
             PRIMARY KEY (pk)
         )
         PARTITION BY HASH(pk)
-        WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1);
+        WITH (STORE = COLUMN, PARTITION_COUNT = 1);
         ------
         SCHEMA:
         ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `SCAN_READER_POLICY_NAME`=`SIMPLE`)
@@ -750,7 +878,7 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
             PRIMARY KEY (pk)
         )
         PARTITION BY HASH(pk)
-        WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1);
+        WITH (STORE = COLUMN, PARTITION_COUNT = 1);
         ------
         SCHEMA:
         ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `COMPACTION_PLANNER.CLASS_NAME`=`lc-buckets`, `COMPACTION_PLANNER.FEATURES`=`{"levels":[{"class_name":"Zero","portions_count_limit":1048576,"expected_blobs_size":1048576,"portions_count_available":1,"portions_live_duration":"1s"},{"class_name":"OneLayer","expected_portion_size":2097152,"size_limit_guarantee":134217728}]}`)
@@ -808,7 +936,7 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
             PRIMARY KEY (pk)
         )
         PARTITION BY HASH(pk)
-        WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1);
+        WITH (STORE = COLUMN, PARTITION_COUNT = 1);
         ------
         SCHEMA:
         ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `COMPACTION_PLANNER.CLASS_NAME`=`lc-buckets`, `COMPACTION_PLANNER.FEATURES`=`{"levels":[{"class_name":"Zero","portions_count_limit":1048576,"expected_blobs_size":1048576,"portions_count_available":1,"portions_live_duration":"1s"},{"class_name":"OneLayer","expected_portion_size":2097152,"size_limit_guarantee":134217728}]}`)
@@ -877,7 +1005,7 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
             PRIMARY KEY (pk)
         )
         PARTITION BY HASH(pk)
-        WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1);
+        WITH (STORE = COLUMN, PARTITION_COUNT = 1);
         ------
         SCHEMA:
         ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `COMPACTION_PLANNER.CLASS_NAME`=`lc-buckets`, `COMPACTION_PLANNER.FEATURES`=`{"levels":[{"class_name":"Zero","portions_count_limit":1048576,"expected_blobs_size":1048576,"portions_count_available":1,"portions_live_duration":"1s"},{"class_name":"OneLayer","expected_portion_size":2097152,"size_limit_guarantee":134217728}]}`)
@@ -950,7 +1078,7 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
             PRIMARY KEY (pk)
         )
         PARTITION BY HASH(pk)
-        WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1);
+        WITH (STORE = COLUMN, PARTITION_COUNT = 1);
         ------
         SCHEMA:
         ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=ALTER_COLUMN, NAME=field, `DATA_ACCESSOR_CONSTRUCTOR.CLASS_NAME`=`DICTIONARY`)
@@ -997,7 +1125,7 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
             PRIMARY KEY (pk)
         )
         PARTITION BY HASH(pk)
-        WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1);
+        WITH (STORE = COLUMN, PARTITION_COUNT = 1);
         ------
         SCHEMA:
         ALTER OBJECT `/Root/ColumnTable` (TYPE TABLE) SET (ACTION=UPSERT_OPTIONS, `SCAN_READER_POLICY_NAME`=`SIMPLE`)
@@ -1079,7 +1207,7 @@ Y_UNIT_TEST_SUITE(KqpOlapDictionary) {
                 PRIMARY KEY (pk)
             )
             PARTITION BY HASH(pk)
-            WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1);
+            WITH (STORE = COLUMN, PARTITION_COUNT = 1);
         )";
         auto createResult = session.ExecuteSchemeQuery(createTable).GetValueSync();
         UNIT_ASSERT_C(createResult.IsSuccess(), createResult.GetIssues().ToString());
