@@ -1,0 +1,98 @@
+# Соответствует по смыслу `processors.ydb_supplier` из:
+#   arcadia/kikimr/ci/stability/resources/ydb_olap_perf/collector.yaml
+#
+# Запуск: otel_logs_to_ydb --config /path/to/this/file
+#
+# Отличия от Go-коллектора (v1 C++):
+# - OTLP только gRPC (HTTP :8090 из collector здесь не поднимается).
+# - `additional_dbs` у dedicated_service не поддерживается — для `processing`
+#   ниже только основной YDB из ydb_endpoint/ydb_database.
+# - `max_inflight_requests` / `max_memory_usage` приёмника → ориентир `ingest_queue_max`.
+# - `buffer_size` коллектора → `ingest_queue_max`; параллель записи в YDB ближе к
+#   `ydb_max_concurrent_bulk` + `ingest_workers`, чем к одному `supplier_pool_size`.
+
+otel_logs_to_ydb:
+  # Было: receivers.otlpwithyandexvalidation.protocols.grpc.endpoint :8080
+  grpc_listen: "0.0.0.0:8080"
+  grpc_max_pollers: 2048
+
+  # Было: receivers... max_inflight_requests / buffer_size (см. комментарий выше)
+  ingest_queue_max: 100000
+  ingest_workers: 64
+
+  # Было: extensions.logging_bootstrap.user_metrics_listen_address :8890
+  # и service.telemetry.metrics.address 0.0.0.0:9999 — для Prometheus оставлен один порт;
+  # при необходимости поменяйте на :8890 как в logging_bootstrap.
+  metrics_listen: "0.0.0.0:9999"
+
+  # Было: extensions.health_check
+  health_listen: "0.0.0.0:8081"
+  health_path: /ping
+
+  ydb_endpoint: "localhost:2135"
+  ydb_database: "/olap-perf/deploy_logs"
+  ydb_tables_prefix: "/olap-perf/deploy_logs"
+  ydb_token: "${env:YDB_TOKEN}"
+
+  ydb_write_timeout_sec: 60
+  ydb_max_concurrent_bulk: 256
+  supplier_pool_size: 256
+
+  table_layout: per_service
+  write_only_dedicated: true
+
+  allowed_projects:
+    - techplatform
+
+  ydb_common_logs_dir: "logs_store"
+  ydb_dedicated_logs_dir: "logs"
+
+  batch_by_shard_hash: true
+  # XOR: только одно из min_flush_records / min_flush_bytes (не оба).
+  # Батч уходит в YDB при накоплении порога ИЛИ если не было успешной записи по шарду `flush_interval` секунд.
+  shard_buffer_min_flush_records: 10000
+  # shard_buffer_min_flush_bytes: 16777216
+  shard_buffer_flush_interval_sec: 600
+
+  auto_create_missing_tables: true
+  auto_create_partition_count_common: 24
+  auto_create_partition_count_dedicated: 48
+
+  ttl:
+    delete_interval: "720h"
+    external:
+      path: /olap-perf/deploy_logs/s3_tier
+      interval: "48h"
+
+  logs_column_compression:
+    message:
+      algorithm: zstd
+      level: 4
+    labels:
+      algorithm: zstd
+      level: 4
+    meta:
+      algorithm: zstd
+      level: 4
+
+  # Было: processors.ydb_supplier.compaction (levels + node_portions_count_limit).
+  # В C++ передаётся готовый JSON для COMPACTION_PLANNER.FEATURES (как features_json в Go).
+  compaction:
+    features_json: '{"levels":[{"class_name":"Zero","expected_blobs_size":2097152,"portions_count_limit":15000000,"portions_live_duration":"180s","concurrency":2},{"class_name":"Zero","expected_blobs_size":33554432,"portions_count_limit":15000000}],"node_portions_count_limit":15000000}'
+
+  project_routing:
+    techplatform:
+      base_table_name: common
+      dedicated_service:
+        - cluster: production
+          service: billing-fin-payouts
+        - cluster: production
+          service: candidates
+        - cluster: production
+          service: processing
+        - cluster: production
+          service: stq-agent
+
+  max_retries: 3
+  retry_backoff_ms: 200
+  validation_enabled: false

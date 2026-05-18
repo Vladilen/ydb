@@ -1,0 +1,33 @@
+#pragma once
+
+#include "otel_logs_service.h"
+#include "otel_logs_shard_hash.h"
+
+#include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/table/table.h>
+
+#include <mutex>
+#include <unordered_set>
+
+namespace NColumnShard::NOtelLogsToYdb {
+
+/// Auto-create logs column table + TTL + compaction (subset of Go `schema_ensure`).
+class TDdlEnsurer {
+public:
+    TDdlEnsurer(TServerConfig cfg);
+
+    /// Creates table if missing (scheme error on upsert), then TTL + compaction JSON.
+    bool EnsureLogsTable(NYdb::NTable::TTableClient& client, const TString& tablePath, ELogsPkSchema schema, TString* err);
+
+private:
+    TString BuildCreateDdl(const TString& tablePath, ELogsPkSchema schema) const;
+    TString BuildTtlDdl(const TString& tablePath) const;
+    TString BuildCompactionDdl(const TString& tablePath) const;
+
+    bool ExecScheme(NYdb::NTable::TTableClient& client, const TString& yql, TString* err);
+
+    TServerConfig Cfg_;
+    std::mutex Mu_;
+    std::unordered_set<std::string> Ensured_;
+};
+
+} // namespace NColumnShard::NOtelLogsToYdb

@@ -101,6 +101,7 @@ RECURSE(
     splitter
     tools/visualize_portions
     tools/memory_tests
+    tools/otel_logs_to_ydb
 )
 
 RECURSE_FOR_TESTS(
