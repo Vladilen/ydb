@@ -19,6 +19,8 @@ otel_logs_to_ydb:
   # Было: receivers... max_inflight_requests / buffer_size (см. комментарий выше)
   ingest_queue_max: 100000
   ingest_workers: 64
+  # Wire-scan Export before ingest queue (skip queue + full parse for non-dedicated batches).
+  export_routable_wire_precheck: true
 
   # Было: extensions.logging_bootstrap.user_metrics_listen_address :8890
   # и service.telemetry.metrics.address 0.0.0.0:9999 — для Prometheus оставлен один порт;
@@ -84,10 +86,10 @@ otel_logs_to_ydb:
     techplatform:
       base_table_name: common
       dedicated_service:
-        - cluster: production
-          service: billing-fin-payouts
-        - cluster: production
-          service: candidates
+        # - cluster: production
+        #   service: billing-fin-payouts
+        # - cluster: production
+        #   service: candidates
         - cluster: production
           service: processing
         - cluster: production

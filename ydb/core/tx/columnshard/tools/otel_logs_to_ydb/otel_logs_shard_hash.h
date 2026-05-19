@@ -1,5 +1,7 @@
 #pragma once
 
+#include "otel_logs_owned_row.h"
+
 #include <util/datetime/base.h>
 #include <util/generic/strbuf.h>
 #include <util/system/types.h>
@@ -16,6 +18,10 @@ enum class ELogsPkSchema : int {
 ui64 HashPartitionKey(ELogsPkSchema schema, TInstant ts, TStringBuf a, TStringBuf b, TStringBuf c);
 
 /// Maps hash to shard index [0, numShards), same as Go `ShardIndex`.
+/// `numShards` must equal table `PARTITION_COUNT` (auto_create_partition_count_* in config).
 int ShardIndexFromHash(ui64 h, int numShards);
+
+/// Hash over PARTITION BY HASH columns using the same values as Arrow BulkUpsert (see `TOwnedLogRow`).
+ui64 HashOwnedLogRow(ELogsPkSchema schema, const TOwnedLogRow& row);
 
 } // namespace NColumnShard::NOtelLogsToYdb

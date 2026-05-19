@@ -12,6 +12,7 @@ SRCS(
     otel_logs_routing.cpp
     otel_logs_shard_hash.cpp
     otel_logs_service.cpp
+    otel_logs_wire_routable.cpp
 )
 
 PEERDIR(

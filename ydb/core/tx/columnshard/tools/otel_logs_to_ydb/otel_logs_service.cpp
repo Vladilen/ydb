@@ -3,9 +3,11 @@
 #include "health_check_server.h"
 #include "otel_logs_ddl.h"
 #include "otel_logs_metrics.h"
+#include "otel_logs_owned_row.h"
 #include "otel_logs_routing.h"
 #include "otel_logs_shard_hash.h"
 #include "otel_logs_validator.h"
+#include "otel_logs_wire_routable.h"
 
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/table/table.h>
 
@@ -27,7 +29,12 @@
 #include <opentelemetry/proto/logs/v1/logs.pb.h>
 #include <opentelemetry/proto/resource/v1/resource.pb.h>
 
+#include <google/protobuf/arena.h>
+
+#include <grpcpp/generic/async_generic_service.h>
+#include <grpcpp/impl/serialization_traits.h>
 #include <grpcpp/server_builder.h>
+#include <grpcpp/support/server_callback.h>
 #include <grpcpp/support/status.h>
 
 #include <util/charset/wide.h>
@@ -360,9 +367,54 @@ private:
 
 namespace {
 
+constexpr TStringBuf kExportMethod = "/opentelemetry.proto.collector.logs.v1.LogsService/Export";
+
+struct TIngestWirePayload {
+    grpc::ByteBuffer Buf;
+};
+
+const ologs::ExportLogsServiceRequest* ParseExportWire(
+    grpc::ByteBuffer* buf,
+    google::protobuf::Arena* arena)
+{
+    if (!buf || !buf->Valid()) {
+        return nullptr;
+    }
+    auto* req = google::protobuf::Arena::CreateMessage<ologs::ExportLogsServiceRequest>(arena);
+    if (!grpc::SerializationTraits<ologs::ExportLogsServiceRequest>::Deserialize(buf, req).ok()) {
+        return nullptr;
+    }
+    return req;
+}
+
+bool IssuesContainAsciiInsensitive(TStringBuf haystack, TStringBuf needle) {
+    if (needle.empty() || haystack.size() < needle.size()) {
+        return false;
+    }
+    const size_t last = haystack.size() - needle.size();
+    for (size_t i = 0; i <= last; ++i) {
+        bool match = true;
+        for (size_t j = 0; j < needle.size(); ++j) {
+            const unsigned char a = static_cast<unsigned char>(haystack[i + j]);
+            const unsigned char b = static_cast<unsigned char>(needle[j]);
+            const unsigned char al = (a >= 'A' && a <= 'Z') ? static_cast<unsigned char>(a - 'A' + 'a') : a;
+            const unsigned char bl = (b >= 'A' && b <= 'Z') ? static_cast<unsigned char>(b - 'A' + 'a') : b;
+            if (al != bl) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Same triggers as Go `isYdbUnknownTableErr` (case-insensitive `unknown table` + scheme-ish markers).
 bool ShouldTryDdlAfterBulkError(TStringBuf issues) {
-    return issues.Contains("does not exist") || issues.Contains("Does not exist") || issues.Contains("SCHEME_ERROR")
-        || issues.Contains("not found") || issues.Contains("Unknown table");
+    return IssuesContainAsciiInsensitive(issues, "unknown table") || issues.Contains("does not exist")
+        || issues.Contains("Does not exist") || issues.Contains("SCHEME_ERROR") || issues.Contains("not found");
 }
 
 size_t CountExportLogRecords(const ologs::ExportLogsServiceRequest& req) {
@@ -375,7 +427,7 @@ size_t CountExportLogRecords(const ologs::ExportLogsServiceRequest& req) {
     return n;
 }
 
-/// Same project / route / drop rules as `ProcessExport`; avoids full `CopyFrom` when nothing would be written.
+/// Same project / route / drop rules as `ProcessExport`.
 bool ExportHasRoutableLogRows(const TServerConfig& cfg, const ologs::ExportLogsServiceRequest& request) {
     const bool perProject = IsPerProjectLayout(cfg);
     THashSet<TString> allowed;
@@ -414,7 +466,7 @@ public:
     {
     }
 
-    bool TryPush(std::unique_ptr<ologs::ExportLogsServiceRequest> req) {
+    bool TryPush(TIngestWirePayload payload) {
         std::lock_guard<std::mutex> g(Mu_);
         if (Stopped_) {
             return false;
@@ -422,7 +474,7 @@ public:
         if (Q_.size() >= Cap_) {
             return false;
         }
-        Q_.push_back(std::move(req));
+        Q_.push_back(std::move(payload));
         if (M_) {
             M_->SetIngestQueueDepth(Q_.size());
         }
@@ -436,7 +488,7 @@ public:
         Cv_.notify_all();
     }
 
-    bool WaitPop(std::unique_ptr<ologs::ExportLogsServiceRequest>* out) {
+    bool WaitPop(TIngestWirePayload* out) {
         std::unique_lock<std::mutex> lk(Mu_);
         Cv_.wait(lk, [&] { return Stopped_ || !Q_.empty(); });
         if (Q_.empty()) {
@@ -455,7 +507,7 @@ private:
     TPrometheusMetrics* M_ = nullptr;
     std::mutex Mu_;
     std::condition_variable Cv_;
-    std::deque<std::unique_ptr<ologs::ExportLogsServiceRequest>> Q_;
+    std::deque<TIngestWirePayload> Q_;
     bool Stopped_ = false;
 };
 
@@ -582,17 +634,6 @@ struct TBuckHash {
             THash<TString>()(k.Table),
             CombineHashes(THash<int>()(k.Shard), THash<int>()(static_cast<int>(k.Schema))));
     }
-};
-
-struct TOwnedLogRow {
-    TInstant Ts;
-    TString Service;
-    TString Cluster;
-    TString RecordId;
-    i32 Level = 0;
-    TString Message;
-    TString LabelsJson;
-    TString MetaJson;
 };
 
 static ui64 OwnedRowApproxBytes(const TOwnedLogRow& r) noexcept {
@@ -867,7 +908,7 @@ struct TOtelLogsServer::TImpl {
     std::unique_ptr<TPrometheusHttpServer> MetricsServer;
     std::vector<std::thread> Workers;
     std::atomic<bool> StopPipeline{false};
-    std::unique_ptr<ologs::LogsService::Service> GrpcService;
+    std::unique_ptr<grpc::CallbackGenericService> GrpcGenericService;
     std::unique_ptr<grpc::Server> GrpcServer;
 
     THashMap<TBuck, std::unique_ptr<TShardBuffer>, TBuckHash> ShardBuf_;
@@ -896,19 +937,33 @@ struct TOtelLogsServer::TImpl {
 
     void WorkerLoop() {
         for (;;) {
-            std::unique_ptr<ologs::ExportLogsServiceRequest> req;
-            if (!Queue.WaitPop(&req)) {
+            TIngestWirePayload payload;
+            if (!Queue.WaitPop(&payload)) {
                 if (StopPipeline.load(std::memory_order_acquire)) {
                     return;
                 }
                 continue;
             }
+            google::protobuf::Arena arena;
+            const ui64 protoBytes = static_cast<ui64>(payload.Buf.Length());
+            const ologs::ExportLogsServiceRequest* req = ParseExportWire(&payload.Buf, &arena);
+            if (!req) {
+                continue;
+            }
+            if (!RunOptionalLogValidation(Cfg.ValidationEnabled, *req)) {
+                continue;
+            }
+            if (!Cfg.ExportRoutableWirePrecheck && !ExportHasRoutableLogRows(Cfg, *req)) {
+                continue;
+            }
+            const size_t logRows = CountExportLogRecords(*req);
+            Metrics->AddPipelineIn(static_cast<ui64>(logRows), protoBytes);
             ProcessExport(*req);
         }
     }
 
-    bool TryEnqueue(std::unique_ptr<ologs::ExportLogsServiceRequest> req) {
-        return Queue.TryPush(std::move(req));
+    bool TryEnqueue(TIngestWirePayload payload) {
+        return Queue.TryPush(std::move(payload));
     }
 
     void Run() {
@@ -925,7 +980,7 @@ struct TOtelLogsServer::TImpl {
         const TString listenAddr{TStringBuf(Cfg.ListenAddress.data(), Cfg.ListenAddress.size())};
         builder.AddListeningPort(listenAddr, grpc::InsecureServerCredentials());
         builder.SetSyncServerOption(grpc::ServerBuilder::MAX_POLLERS, Cfg.GrpcMaxPollers);
-        builder.RegisterService(GrpcService.get());
+        builder.RegisterCallbackGenericService(GrpcGenericService.get());
         GrpcServer = builder.BuildAndStart();
         if (!GrpcServer) {
             ythrow yexception() << "failed to start gRPC server on " << Cfg.ListenAddress;
@@ -946,7 +1001,8 @@ struct TOtelLogsServer::TImpl {
         std::cerr << "otel_logs_to_ydb listening grpc://" << Cfg.ListenAddress << " ydb=" << Cfg.YdbEndpoint
                   << " db=" << Cfg.YdbDatabase << " prefix=" << Cfg.TablesPrefix << " layout=" << Cfg.TableLayout
                   << " ingest_queue=" << Cfg.IngestQueueMax << " workers=" << nWorkers << " ydb_max_concurrent_bulk="
-                  << Cfg.YdbMaxConcurrentBulkUpserts << " allowed_projects=";
+                  << Cfg.YdbMaxConcurrentBulkUpserts << " export_routable_wire_precheck="
+                  << (Cfg.ExportRoutableWirePrecheck ? "true" : "false") << " allowed_projects=";
         if (Cfg.AllowedProjects.empty()) {
             std::cerr << "all";
         } else {
@@ -992,23 +1048,15 @@ struct TOtelLogsServer::TImpl {
     }
 };
 
-class TLogsGrpcService final : public ologs::LogsService::Service {
+class TExportReactor final : public grpc::ServerGenericBidiReactor {
 public:
-    TLogsGrpcService(TOtelLogsServer::TImpl* impl, NYdb::NTable::TTableClient& /*table*/, TServerConfig cfg)
+    explicit TExportReactor(TOtelLogsServer::TImpl* impl)
         : Impl_(impl)
-        , Cfg_(std::move(cfg))
     {
+        StartRead(&ReadBuf_);
     }
 
-    grpc::Status Export(
-        grpc::ServerContext* /*ctx*/,
-        const ologs::ExportLogsServiceRequest* request,
-        ologs::ExportLogsServiceResponse* response) override
-    {
-        Y_UNUSED(response);
-        if (!RunOptionalLogValidation(Cfg_.ValidationEnabled, *request)) {
-            return grpc::Status::OK;
-        }
+    void OnReadDone(bool ok) override {
         struct TInflightGuard {
             TPrometheusMetrics* M = nullptr;
             explicit TInflightGuard(TPrometheusMetrics* m)
@@ -1025,24 +1073,70 @@ public:
             }
         };
         const TInflightGuard inflight(Impl_->Metrics.get());
-        const ui64 protoBytes = static_cast<ui64>(request->ByteSizeLong());
-        const size_t logRows = CountExportLogRecords(*request);
+
+        if (!ok) {
+            Finish(grpc::Status(grpc::StatusCode::INTERNAL, "read failed"));
+            return;
+        }
+
+        if (!ReadBuf_.Valid() || ReadBuf_.Length() == 0) {
+            Finish(grpc::Status(grpc::StatusCode::INTERNAL, "empty request"));
+            return;
+        }
+
+        const ui64 protoBytes = static_cast<ui64>(ReadBuf_.Length());
         Impl_->Metrics->AddGrpcExportRequestBytes(protoBytes);
 
-        if (!ExportHasRoutableLogRows(Cfg_, *request)) {
-            return grpc::Status::OK;
+        if (Impl_->Cfg.ExportRoutableWirePrecheck && !ExportWireHasRoutableLogRows(&ReadBuf_, Impl_->Cfg)) {
+            Finish(grpc::Status::OK);
+            return;
         }
 
-        auto copy = std::make_unique<ologs::ExportLogsServiceRequest>();
-        copy->CopyFrom(*request);
-        if (!Impl_->TryEnqueue(std::move(copy))) {
-            Impl_->Metrics->AddRefused(static_cast<ui64>(logRows), protoBytes);
+        TIngestWirePayload payload;
+        payload.Buf = std::move(ReadBuf_);
+        if (!Impl_->TryEnqueue(std::move(payload))) {
+            Impl_->Metrics->AddRefused(0, protoBytes);
             Impl_->Metrics->IncIngestRejectedQueueFull();
-            return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "ingest queue full");
+            Finish(grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "ingest queue full"));
+            return;
         }
-        Impl_->Metrics->AddPipelineIn(static_cast<ui64>(logRows), protoBytes);
         Impl_->Metrics->IncIngestAccepted();
-        return grpc::Status::OK;
+        Finish(grpc::Status::OK);
+    }
+
+    void OnDone() override {
+        delete this;
+    }
+
+private:
+    TOtelLogsServer::TImpl* Impl_;
+    grpc::ByteBuffer ReadBuf_;
+};
+
+class TUnknownGrpcMethodReactor final : public grpc::ServerGenericBidiReactor {
+public:
+    TUnknownGrpcMethodReactor() {
+        Finish(grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "unknown method"));
+    }
+
+    void OnDone() override {
+        delete this;
+    }
+};
+
+class TLogsGrpcGenericService final : public grpc::CallbackGenericService {
+public:
+    TLogsGrpcGenericService(TOtelLogsServer::TImpl* impl, TServerConfig cfg)
+        : Impl_(impl)
+        , Cfg_(std::move(cfg))
+    {
+    }
+
+    grpc::ServerGenericBidiReactor* CreateReactor(grpc::GenericCallbackServerContext* ctx) override {
+        if (TStringBuf(ctx->method()) != kExportMethod) {
+            return new TUnknownGrpcMethodReactor();
+        }
+        return new TExportReactor(Impl_);
     }
 
 private:
@@ -1079,34 +1173,15 @@ void TOtelLogsServer::TImpl::ProcessExport(const ologs::ExportLogsServiceRequest
 
         for (const ScopeLogs& sl : rl.scope_logs()) {
             for (const LogRecord& lr : sl.log_records()) {
+                TOwnedLogRow row = MakeOwnedLogRow(rl, lr);
                 TBuck bk;
                 bk.Table = route.TablePath;
                 bk.Schema = route.PkSchema;
                 bk.Shard = 0;
                 if (Cfg.BatchByShardHash && partCount > 0) {
-                    TString recordIdTmp;
-                    THashMap<TString, TString> ll, lm;
-                    SplitLogAttributes(lr.attributes(), &recordIdTmp, &ll, &lm);
-                    if (recordIdTmp.empty()) {
-                        recordIdTmp = TString{"pending"};
-                    }
-                    const TInstant ts = TimestampFromNanos(lr.time_unix_nano() ? lr.time_unix_nano() : lr.observed_time_unix_nano());
-                    TString serviceValue = ps.Service.empty() ? TString{"_unknown"} : Utf8Safe(ps.Service);
-                    ui64 h = 0;
-                    switch (route.PkSchema) {
-                        case ELogsPkSchema::PerService:
-                            h = HashPartitionKey(route.PkSchema, ts, cluster, recordIdTmp, TStringBuf{});
-                            break;
-                        case ELogsPkSchema::PerProjectHeap:
-                            h = HashPartitionKey(route.PkSchema, ts, serviceValue, cluster, recordIdTmp);
-                            break;
-                        case ELogsPkSchema::Dedicated:
-                            h = HashPartitionKey(route.PkSchema, ts, recordIdTmp, TStringBuf{}, TStringBuf{});
-                            break;
-                    }
-                    bk.Shard = ShardIndexFromHash(h, partCount);
+                    bk.Shard = ShardIndexFromHash(HashOwnedLogRow(route.PkSchema, row), partCount);
                 }
-                buckets[bk].push_back(MakeOwnedLogRow(rl, lr));
+                buckets[bk].push_back(std::move(row));
             }
         }
     }
@@ -1247,6 +1322,7 @@ void TOtelLogsServer::TImpl::BulkUpsertOwnedRows(const TBuck& buck, TVector<TOwn
                     Metrics->IncDdlRuns();
                     continue;
                 }
+                std::cerr << "Auto-DDL failed table=" << tablePath << " err=" << derr << std::endl;
             }
             if (attempt < Cfg.MaxRetries) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(Cfg.RetryBackoffMs));
@@ -1340,7 +1416,7 @@ TOtelLogsServer::TOtelLogsServer(TServerConfig cfg)
           }(Cfg_))
     , Impl_(std::make_unique<TImpl>(Cfg_, Driver_))
 {
-    Impl_->GrpcService = std::make_unique<TLogsGrpcService>(Impl_.get(), *Impl_->TableClient, Cfg_);
+    Impl_->GrpcGenericService = std::make_unique<TLogsGrpcGenericService>(Impl_.get(), Cfg_);
 }
 
 TOtelLogsServer::~TOtelLogsServer() {

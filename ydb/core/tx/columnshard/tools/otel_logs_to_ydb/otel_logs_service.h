@@ -74,12 +74,15 @@ struct TServerConfig {
     ui32 YdbWriteTimeoutSec = 60;
 
     bool ValidationEnabled = false;
+
+    /// Wire-scan Export before ingest queue (skip full parse for non-routable batches).
+    bool ExportRoutableWirePrecheck = false;
 };
 
 /// OTLP gRPC LogsService + async pipeline → YDB BulkUpsert.
 class TOtelLogsServer {
 public:
-    /// Opaque server state (gRPC + workers); public forward decl for `TLogsGrpcService` in .cpp.
+    /// Opaque server state (gRPC + workers); public forward decl for gRPC ingest in .cpp.
     struct TImpl;
 
     explicit TOtelLogsServer(TServerConfig cfg);

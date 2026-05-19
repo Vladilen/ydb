@@ -1,5 +1,7 @@
 #include "otel_logs_shard_hash.h"
 
+#include "otel_logs_owned_row.h"
+
 /* Stack-allocated XXH64_state_t is only visible with this define (xxhash 0.8+). */
 #define XXH_STATIC_LINKING_ONLY
 #include <contrib/libs/xxhash/xxhash.h>
@@ -47,6 +49,18 @@ ui64 HashPartitionKey(ELogsPkSchema schema, TInstant ts, TStringBuf a, TStringBu
             break;
     }
     return XXH64_digest(&st);
+}
+
+ui64 HashOwnedLogRow(ELogsPkSchema schema, const TOwnedLogRow& row) {
+    switch (schema) {
+        case ELogsPkSchema::PerService:
+            return HashPartitionKey(schema, row.Ts, row.Cluster, row.RecordId, TStringBuf{});
+        case ELogsPkSchema::PerProjectHeap:
+            return HashPartitionKey(schema, row.Ts, row.Service, row.Cluster, row.RecordId);
+        case ELogsPkSchema::Dedicated:
+            return HashPartitionKey(schema, row.Ts, row.RecordId, TStringBuf{}, TStringBuf{});
+    }
+    return 0;
 }
 
 int ShardIndexFromHash(ui64 h, int numShards) {

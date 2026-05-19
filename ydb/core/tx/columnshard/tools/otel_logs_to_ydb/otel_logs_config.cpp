@@ -170,6 +170,7 @@ bool LoadOtelLogsYaml(const TString& path, TServerConfig* cfg, TString* errorMsg
         cfg->RetryBackoffMs = static_cast<ui32>(Max<i64>(0, NodeAsInt64(n["retry_backoff_ms"], cfg->RetryBackoffMs)));
         cfg->YdbWriteTimeoutSec = static_cast<ui32>(Max<i64>(1, NodeAsInt64(n["ydb_write_timeout_sec"], cfg->YdbWriteTimeoutSec)));
         cfg->ValidationEnabled = NodeAsBool(n["validation_enabled"], cfg->ValidationEnabled);
+        cfg->ExportRoutableWirePrecheck = NodeAsBool(n["export_routable_wire_precheck"], cfg->ExportRoutableWirePrecheck);
 
         const YAML::Node ap = n["allowed_projects"];
         if (ap && ap.IsSequence()) {
