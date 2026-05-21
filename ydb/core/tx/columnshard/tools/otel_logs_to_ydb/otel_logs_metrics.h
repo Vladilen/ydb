@@ -42,9 +42,10 @@ public:
         LogRowsRefused_ += logRows;
         LogBytesRefused_ += protoBytes;
     }
-    void AddYdbWritten(ui64 logRows, ui64 approxBytes) {
+    /// `arrowWireBytes` = schema IPC + data IPC sent to BulkUpsert (same as Go `len(schema)+len(data)`).
+    void AddYdbWritten(ui64 logRows, ui64 arrowWireBytes) {
         LogRowsYdbWritten_ += logRows;
-        LogBytesYdbWritten_ += approxBytes;
+        LogBytesYdbWritten_ += arrowWireBytes;
     }
 
     void IncGrpcExportRpcInflight() {
@@ -57,6 +58,45 @@ public:
     void SetIngestQueueDepth(size_t depth) {
         IngestQueueDepth_.store(static_cast<ui64>(depth), std::memory_order_relaxed);
     }
+    void SetIngestQueueCapacity(size_t cap) {
+        IngestQueueCapacity_.store(static_cast<ui64>(cap), std::memory_order_relaxed);
+    }
+    void SetIngestWorkersTotal(size_t n) {
+        IngestWorkersTotal_.store(static_cast<ui64>(n), std::memory_order_relaxed);
+    }
+    void IncIngestWorkersBusy() {
+        IngestWorkersBusy_.fetch_add(1, std::memory_order_relaxed);
+    }
+    void DecIngestWorkersBusy() {
+        IngestWorkersBusy_.fetch_sub(1, std::memory_order_relaxed);
+    }
+    void SetYdbFlushQueueDepth(size_t depth) {
+        YdbFlushQueueDepth_.store(static_cast<ui64>(depth), std::memory_order_relaxed);
+    }
+    void SetYdbFlushQueueCapacity(size_t cap) {
+        YdbFlushQueueCapacity_.store(static_cast<ui64>(cap), std::memory_order_relaxed);
+    }
+    void SetYdbFlushWorkersTotal(size_t n) {
+        YdbFlushWorkersTotal_.store(static_cast<ui64>(n), std::memory_order_relaxed);
+    }
+    void IncYdbFlushWorkersBusy() {
+        YdbFlushWorkersBusy_.fetch_add(1, std::memory_order_relaxed);
+    }
+    void DecYdbFlushWorkersBusy() {
+        YdbFlushWorkersBusy_.fetch_sub(1, std::memory_order_relaxed);
+    }
+    void SetYdbBulkWriteInflight(int n) {
+        if (n < 0) {
+            n = 0;
+        }
+        YdbBulkWriteInflight_.store(static_cast<ui64>(n), std::memory_order_relaxed);
+    }
+    void SetShardBufferLogRows(ui64 rows) {
+        ShardBufferLogRows_.store(rows, std::memory_order_relaxed);
+    }
+    void SetShardBuffersActive(ui64 n) {
+        ShardBuffersActive_.store(n, std::memory_order_relaxed);
+    }
 
     /// Arrow encode only (SerializeLogsBulkArrow → wire buffers); same ms buckets as legacy combined histogram.
     void ObserveBulkArrowEncodeMs(ui64 durationMs);
@@ -66,6 +106,11 @@ public:
 
     void AddGrpcExportRequestBytes(ui64 bytes) {
         GrpcExportRequestBytes_ += bytes;
+    }
+
+    /// OTLP wire bytes passed routable precheck (if enabled) and offered to ingest queue before TryPush (includes queue-full rejects).
+    void AddIngestOfferBytes(ui64 protoBytes) {
+        LogBytesIngestOffer_ += protoBytes;
     }
 
     TString RenderText() const;
@@ -113,8 +158,19 @@ private:
 
     std::atomic<i64> GrpcExportRpcInflight_{0};
     std::atomic<ui64> IngestQueueDepth_{0};
+    std::atomic<ui64> IngestQueueCapacity_{0};
+    std::atomic<ui64> IngestWorkersTotal_{0};
+    std::atomic<ui64> IngestWorkersBusy_{0};
+    std::atomic<ui64> YdbFlushQueueDepth_{0};
+    std::atomic<ui64> YdbFlushQueueCapacity_{0};
+    std::atomic<ui64> YdbFlushWorkersTotal_{0};
+    std::atomic<ui64> YdbFlushWorkersBusy_{0};
+    std::atomic<ui64> YdbBulkWriteInflight_{0};
+    std::atomic<ui64> ShardBufferLogRows_{0};
+    std::atomic<ui64> ShardBuffersActive_{0};
 
     std::atomic<ui64> GrpcExportRequestBytes_{0};
+    std::atomic<ui64> LogBytesIngestOffer_{0};
 
     std::array<std::atomic<ui64>, 9> BulkArrowEncodeBuckets_{};
     std::atomic<ui64> BulkArrowEncodeInf_{0};

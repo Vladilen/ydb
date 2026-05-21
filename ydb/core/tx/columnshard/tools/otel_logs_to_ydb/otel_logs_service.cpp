@@ -37,6 +37,7 @@
 #include <grpcpp/support/server_callback.h>
 #include <grpcpp/support/status.h>
 
+#include <util/charset/utf8.h>
 #include <util/charset/wide.h>
 #include <util/datetime/base.h>
 #include <util/generic/guid.h>
@@ -56,6 +57,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <utility>
 
@@ -101,7 +103,18 @@ const THashSet<TStringBuf>& LogLabelAttrKeys() {
 }
 
 TString Utf8Safe(TStringBuf raw) {
+    if (IsUtf(raw)) {
+        return TString{raw};
+    }
     TUtf16String wide = UTF8ToWide<true>(raw.Data(), raw.Size());
+    return WideToUTF8(TWtringBuf(wide));
+}
+
+TString Utf8Safe(TString raw) {
+    if (IsUtf(raw)) {
+        return raw;
+    }
+    TUtf16String wide = UTF8ToWide<true>(raw.data(), raw.size());
     return WideToUTF8(TWtringBuf(wide));
 }
 
@@ -198,7 +211,7 @@ TString BodyToMessageUtf8(const AnyValue& body) {
             break;
         }
     }
-    return Utf8Safe(raw);
+    return Utf8Safe(std::move(raw));
 }
 
 void MergeStringMap(const THashMap<TString, TString>& src, THashMap<TString, TString>* dst) {
@@ -216,9 +229,9 @@ void ParseAttributes(
     for (const KeyValue& kv : kvs) {
         TString val;
         AnyValueToString(kv.value(), &val);
-        val = Utf8Safe(val);
+        val = Utf8Safe(std::move(val));
         if (!val.empty()) {
-            (*out)[TString{Utf8Safe(TStringBuf(kv.key()))}] = val;
+            (*out)[Utf8Safe(TStringBuf(kv.key()))] = val;
         }
     }
 }
@@ -226,6 +239,14 @@ void ParseAttributes(
 struct TProjectService {
     TString Project;
     TString Service;
+};
+
+/// Resource fields parsed once per ResourceLogs (shared by all LogRecords in that resource).
+struct TResourceRowCtx {
+    TString Service;
+    TString Cluster;
+    THashMap<TString, TString> ResourceLabels;
+    THashMap<TString, TString> ResourceMeta;
 };
 
 TProjectService ExtractProjectService(const Resource& resource) {
@@ -257,10 +278,10 @@ void SplitResourceAttributes(
     THashMap<TString, TString>* resourceMeta)
 {
     for (const KeyValue& kv : resource.attributes()) {
-        TString key = TString{Utf8Safe(TStringBuf(kv.key()))};
+        TString key = Utf8Safe(TStringBuf(kv.key()));
         TString val;
         AnyValueToString(kv.value(), &val);
-        val = Utf8Safe(val);
+        val = Utf8Safe(std::move(val));
         if (val.empty()) {
             continue;
         }
@@ -283,10 +304,10 @@ void SplitLogAttributes(
     THashMap<TString, TString>* logMeta)
 {
     for (const KeyValue& kv : kvs) {
-        TString key = TString{Utf8Safe(TStringBuf(kv.key()))};
+        TString key = Utf8Safe(TStringBuf(kv.key()));
         TString val;
         AnyValueToString(kv.value(), &val);
-        val = Utf8Safe(val);
+        val = Utf8Safe(std::move(val));
         if (val.empty()) {
             continue;
         }
@@ -300,6 +321,14 @@ void SplitLogAttributes(
             (*logMeta)[key] = val;
         }
     }
+}
+
+static TResourceRowCtx BuildResourceRowCtx(const Resource& resource, const TProjectService& ps) {
+    TResourceRowCtx ctx;
+    ctx.Service = ps.Service.empty() ? TString{"_unknown"} : ps.Service;
+    ctx.Service = Utf8Safe(std::move(ctx.Service));
+    SplitResourceAttributes(resource, &ctx.Cluster, &ctx.ResourceLabels, &ctx.ResourceMeta);
+    return ctx;
 }
 
 TInstant TimestampFromNanos(ui64 ns) {
@@ -319,8 +348,9 @@ TString TraceHex(TStringBuf id) {
 
 class TYdbBulkWriteLimiter {
 public:
-    explicit TYdbBulkWriteLimiter(int maxConcurrent)
+    explicit TYdbBulkWriteLimiter(int maxConcurrent, TPrometheusMetrics* metrics = nullptr)
         : Max_(Max(1, maxConcurrent))
+        , M_(metrics)
     {
     }
 
@@ -346,23 +376,41 @@ public:
     };
 
 private:
+    void PublishInflight(int n) {
+        if (M_) {
+            M_->SetYdbBulkWriteInflight(n);
+        }
+    }
+
     void Acquire() {
-        std::unique_lock<std::mutex> lock(Mu_);
-        Cv_.wait(lock, [this] { return Active_ < Max_; });
-        ++Active_;
+        int inflight = 0;
+        {
+            std::unique_lock<std::mutex> lock(Mu_);
+            Cv_.wait(lock, [this] { return Active_ < Max_; });
+            ++Active_;
+            inflight = Active_;
+        }
+        // Gauge update outside Mu_: relaxed atomic only, cannot deadlock with shard buffers.
+        PublishInflight(inflight);
     }
 
     void Release() {
-        std::unique_lock<std::mutex> lock(Mu_);
-        --Active_;
-        Y_ASSERT(Active_ >= 0);
-        Cv_.notify_all();
+        int inflight = 0;
+        {
+            std::unique_lock<std::mutex> lock(Mu_);
+            --Active_;
+            Y_ASSERT(Active_ >= 0);
+            inflight = Active_;
+            Cv_.notify_one();
+        }
+        PublishInflight(inflight);
     }
 
     std::mutex Mu_;
     std::condition_variable Cv_;
     int Active_ = 0;
     const int Max_;
+    TPrometheusMetrics* M_ = nullptr;
 };
 
 namespace {
@@ -467,16 +515,20 @@ public:
     }
 
     bool TryPush(TIngestWirePayload payload) {
-        std::lock_guard<std::mutex> g(Mu_);
-        if (Stopped_) {
-            return false;
+        size_t depth = 0;
+        {
+            std::lock_guard<std::mutex> g(Mu_);
+            if (Stopped_) {
+                return false;
+            }
+            if (Q_.size() >= Cap_) {
+                return false;
+            }
+            Q_.push_back(std::move(payload));
+            depth = Q_.size();
         }
-        if (Q_.size() >= Cap_) {
-            return false;
-        }
-        Q_.push_back(std::move(payload));
         if (M_) {
-            M_->SetIngestQueueDepth(Q_.size());
+            M_->SetIngestQueueDepth(depth);
         }
         Cv_.notify_one();
         return true;
@@ -489,15 +541,19 @@ public:
     }
 
     bool WaitPop(TIngestWirePayload* out) {
-        std::unique_lock<std::mutex> lk(Mu_);
-        Cv_.wait(lk, [&] { return Stopped_ || !Q_.empty(); });
-        if (Q_.empty()) {
-            return false;
+        size_t depth = 0;
+        {
+            std::unique_lock<std::mutex> lk(Mu_);
+            Cv_.wait(lk, [&] { return Stopped_ || !Q_.empty(); });
+            if (Q_.empty()) {
+                return false;
+            }
+            *out = std::move(Q_.front());
+            Q_.pop_front();
+            depth = Q_.size();
         }
-        *out = std::move(Q_.front());
-        Q_.pop_front();
         if (M_) {
-            M_->SetIngestQueueDepth(Q_.size());
+            M_->SetIngestQueueDepth(depth);
         }
         return true;
     }
@@ -509,6 +565,29 @@ private:
     std::condition_variable Cv_;
     std::deque<TIngestWirePayload> Q_;
     bool Stopped_ = false;
+};
+
+class TIngestWorkerBusyGuard {
+public:
+    explicit TIngestWorkerBusyGuard(TPrometheusMetrics* m)
+        : M_(m)
+    {
+        if (M_) {
+            M_->IncIngestWorkersBusy();
+        }
+    }
+
+    ~TIngestWorkerBusyGuard() {
+        if (M_) {
+            M_->DecIngestWorkersBusy();
+        }
+    }
+
+    TIngestWorkerBusyGuard(const TIngestWorkerBusyGuard&) = delete;
+    TIngestWorkerBusyGuard& operator=(const TIngestWorkerBusyGuard&) = delete;
+
+private:
+    TPrometheusMetrics* M_ = nullptr;
 };
 
 void ParseListenMetrics(const TString& listen, TString* host, ui16* port) {
@@ -641,16 +720,7 @@ static ui64 OwnedRowApproxBytes(const TOwnedLogRow& r) noexcept {
         + r.MetaJson.size() + 64);
 }
 
-static TOwnedLogRow MakeOwnedLogRow(const ResourceLogs& rl, const LogRecord& lr) {
-    const TProjectService ps = ExtractProjectService(rl.resource());
-    TString serviceValue = ps.Service.empty() ? TString{"_unknown"} : ps.Service;
-    serviceValue = Utf8Safe(serviceValue);
-
-    TString cluster;
-    THashMap<TString, TString> resourceLabels;
-    THashMap<TString, TString> resourceMeta;
-    SplitResourceAttributes(rl.resource(), &cluster, &resourceLabels, &resourceMeta);
-
+static TOwnedLogRow MakeOwnedLogRow(const TResourceRowCtx& res, const LogRecord& lr) {
     TString recordId;
     THashMap<TString, TString> logLabels;
     THashMap<TString, TString> logMeta;
@@ -660,7 +730,7 @@ static TOwnedLogRow MakeOwnedLogRow(const ResourceLogs& rl, const LogRecord& lr)
     }
 
     THashMap<TString, TString> labels = logLabels;
-    MergeStringMap(resourceLabels, &labels);
+    MergeStringMap(res.ResourceLabels, &labels);
 
     TString tid = TraceHex(lr.trace_id());
     if (!tid.empty()) {
@@ -672,12 +742,12 @@ static TOwnedLogRow MakeOwnedLogRow(const ResourceLogs& rl, const LogRecord& lr)
     }
 
     THashMap<TString, TString> meta = logMeta;
-    MergeStringMap(resourceMeta, &meta);
+    MergeStringMap(res.ResourceMeta, &meta);
 
     TOwnedLogRow row;
     row.Ts = TimestampFromNanos(lr.time_unix_nano() ? lr.time_unix_nano() : lr.observed_time_unix_nano());
-    row.Service = std::move(serviceValue);
-    row.Cluster = std::move(cluster);
+    row.Service = res.Service;
+    row.Cluster = res.Cluster;
     row.RecordId = std::move(recordId);
     row.Level = static_cast<i32>(lr.severity_number());
     row.Message = BodyToMessageUtf8(lr.body());
@@ -889,53 +959,201 @@ static void SerializeLogsBulkArrow(
 } // namespace
 
 struct TShardBuffer {
+    explicit TShardBuffer(TBuck buck)
+        : Buck(std::move(buck))
+    {
+    }
+
+    const TBuck Buck;
     std::mutex Mu;
     TVector<TOwnedLogRow> Rows;
     ui64 ApproxBytes = 0;
-    TInstant BufferOpenSince{TInstant::Zero()};
+    /// When unsent rows first appeared after the bucket was empty (Go `pendingSince`).
+    TInstant PendingSince{TInstant::Zero()};
+    /// Last successful BulkUpsert to this shard bucket (Go `lastYdbFlushTime`; Zero = never).
+    TInstant LastYdbFlushOk{TInstant::Zero()};
+};
+
+static ui64 SumOwnedRowsApproxBytes(const TVector<TOwnedLogRow>& rows) {
+    ui64 sum = 0;
+    for (const TOwnedLogRow& r : rows) {
+        sum += OwnedRowApproxBytes(r);
+    }
+    return sum;
+}
+
+static bool NeedsYdbWaitFlush(
+    size_t rowCount,
+    TInstant pendingSince,
+    TInstant lastFlushOk,
+    ui64 intervalSec,
+    TInstant now)
+{
+    if (intervalSec == 0 || rowCount == 0) {
+        return false;
+    }
+    const TDuration interval = TDuration::Seconds(static_cast<ui32>(intervalSec));
+    if (lastFlushOk != TInstant::Zero()) {
+        return (now - lastFlushOk) >= interval;
+    }
+    return pendingSince != TInstant::Zero() && (now - pendingSince) >= interval;
+}
+
+struct TFlushWorkItem {
+    TBuck Buck;
+    TVector<TOwnedLogRow> Rows;
+    TShardBuffer* BufForFlushOk = nullptr;
+};
+
+class TYdbFlushQueue {
+public:
+    explicit TYdbFlushQueue(size_t cap, TPrometheusMetrics* metrics)
+        : Cap_(Max<size_t>(size_t(1), cap))
+        , M_(metrics)
+    {
+        if (M_) {
+            M_->SetYdbFlushQueueCapacity(Cap_);
+        }
+    }
+
+    void PushBlocking(TFlushWorkItem item) {
+        {
+            std::unique_lock<std::mutex> lk(Mu_);
+            CvPush_.wait(lk, [&] { return Stopped_ || Q_.size() < Cap_; });
+            if (Stopped_) {
+                return;
+            }
+            Q_.push_back(std::move(item));
+        }
+        PublishDepth();
+        CvPop_.notify_one();
+    }
+
+    void Stop() {
+        std::lock_guard<std::mutex> g(Mu_);
+        Stopped_ = true;
+        CvPush_.notify_all();
+        CvPop_.notify_all();
+        PublishDepth();
+    }
+
+    bool WaitPop(TFlushWorkItem* out) {
+        {
+            std::unique_lock<std::mutex> lk(Mu_);
+            CvPop_.wait(lk, [&] { return Stopped_ || !Q_.empty(); });
+            if (Q_.empty()) {
+                return false;
+            }
+            *out = std::move(Q_.front());
+            Q_.pop_front();
+        }
+        PublishDepth();
+        return true;
+    }
+
+private:
+    void PublishDepth() {
+        if (!M_) {
+            return;
+        }
+        size_t depth = 0;
+        {
+            std::lock_guard<std::mutex> g(Mu_);
+            depth = Q_.size();
+        }
+        M_->SetYdbFlushQueueDepth(depth);
+    }
+
+    size_t Cap_;
+    TPrometheusMetrics* M_ = nullptr;
+    std::mutex Mu_;
+    std::condition_variable CvPush_;
+    std::condition_variable CvPop_;
+    std::deque<TFlushWorkItem> Q_;
+    bool Stopped_ = false;
+};
+
+class TYdbFlushWorkerBusyGuard {
+public:
+    explicit TYdbFlushWorkerBusyGuard(TPrometheusMetrics* m)
+        : M_(m)
+    {
+        if (M_) {
+            M_->IncYdbFlushWorkersBusy();
+        }
+    }
+
+    ~TYdbFlushWorkerBusyGuard() {
+        if (M_) {
+            M_->DecYdbFlushWorkersBusy();
+        }
+    }
+
+    TYdbFlushWorkerBusyGuard(const TYdbFlushWorkerBusyGuard&) = delete;
+    TYdbFlushWorkerBusyGuard& operator=(const TYdbFlushWorkerBusyGuard&) = delete;
+
+private:
+    TPrometheusMetrics* M_ = nullptr;
 };
 
 struct TOtelLogsServer::TImpl {
     TServerConfig Cfg;
     NYdb::TDriver& Driver;
+    /// Shared so in-flight `/metrics` `DoReply` keeps storage alive after `THttpServer::Stop()` returns.
+    std::shared_ptr<TPrometheusMetrics> Metrics;
     std::shared_ptr<TYdbBulkWriteLimiter> BulkLimiter;
     std::unique_ptr<THealthCheckServer> HealthServer;
     std::unique_ptr<NYdb::NTable::TTableClient> TableClient;
     std::unique_ptr<TDdlEnsurer> Ddl;
-    /// Shared so in-flight `/metrics` `DoReply` keeps storage alive after `THttpServer::Stop()` returns.
-    std::shared_ptr<TPrometheusMetrics> Metrics;
     TIngestQueue Queue;
+    TYdbFlushQueue FlushQueue;
     std::unique_ptr<TPrometheusHttpServer> MetricsServer;
     std::vector<std::thread> Workers;
+    std::vector<std::thread> FlushWorkers;
     std::atomic<bool> StopPipeline{false};
     std::unique_ptr<grpc::CallbackGenericService> GrpcGenericService;
     std::unique_ptr<grpc::Server> GrpcServer;
 
     THashMap<TBuck, std::unique_ptr<TShardBuffer>, TBuckHash> ShardBuf_;
-    std::mutex ShardBufMapMu_;
+    std::shared_mutex ShardBufMapMu_;
+    /// Buffers that may need time-based flush; sweeper walks this instead of the full map.
+    THashSet<TShardBuffer*> PendingSweep_;
+    std::mutex PendingSweepMu_;
     std::thread Sweeper_;
     std::atomic<bool> StopSweeper{false};
-
     TImpl(TServerConfig cfg, NYdb::TDriver& driver)
         : Cfg(std::move(cfg))
         , Driver(driver)
-        , BulkLimiter(std::make_shared<TYdbBulkWriteLimiter>(Cfg.YdbMaxConcurrentBulkUpserts))
         , Metrics(std::make_shared<TPrometheusMetrics>())
+        , BulkLimiter(std::make_shared<TYdbBulkWriteLimiter>(Cfg.YdbMaxConcurrentBulkUpserts, Metrics.get()))
         , Queue(Cfg.IngestQueueMax, Metrics.get())
+        , FlushQueue(Cfg.FlushQueueMax, Metrics.get())
     {
         TableClient = std::make_unique<NYdb::NTable::TTableClient>(Driver);
         Ddl = std::make_unique<TDdlEnsurer>(Cfg);
     }
 
+    static size_t ResolveYdbFlushWorkers(const TServerConfig& cfg) {
+        if (cfg.YdbFlushWorkers > 0) {
+            return cfg.YdbFlushWorkers;
+        }
+        return Max<size_t>(size_t(1), static_cast<size_t>(cfg.YdbMaxConcurrentBulkUpserts));
+    }
+
     void ProcessExport(const ologs::ExportLogsServiceRequest& request);
-    void AppendOwnedShard(const TBuck& buck, TVector<TOwnedLogRow>&& chunk);
-    void TryFlushShardBuffer(const TBuck& buck, TShardBuffer* buf);
-    void BulkUpsertOwnedRows(const TBuck& buck, TVector<TOwnedLogRow>&& rows);
+    void AppendOwnedShards(THashMap<TBuck, TVector<TOwnedLogRow>, TBuckHash>&& buckets);
+    void RegisterPendingSweep(TShardBuffer* buf);
+    void UnregisterPendingSweep(TShardBuffer* buf);
+    void TryFlushShardBuffer(TShardBuffer* buf);
+    void EnqueueFlushWork(TFlushWorkItem item);
+    void BulkUpsertOwnedRows(const TBuck& buck, TVector<TOwnedLogRow>&& rows, TShardBuffer* bufForFlushOk = nullptr);
     void SweepShardBuffersIdle();
     void DrainAllShardBuffers();
     void SweeperLoop();
+    void YdbFlushWorkerLoop();
 
     void WorkerLoop() {
+        thread_local google::protobuf::Arena tlsParseArena;
         for (;;) {
             TIngestWirePayload payload;
             if (!Queue.WaitPop(&payload)) {
@@ -944,9 +1162,10 @@ struct TOtelLogsServer::TImpl {
                 }
                 continue;
             }
-            google::protobuf::Arena arena;
+            const TIngestWorkerBusyGuard busy(Metrics.get());
+            tlsParseArena.Reset();
             const ui64 protoBytes = static_cast<ui64>(payload.Buf.Length());
-            const ologs::ExportLogsServiceRequest* req = ParseExportWire(&payload.Buf, &arena);
+            const ologs::ExportLogsServiceRequest* req = ParseExportWire(&payload.Buf, &tlsParseArena);
             if (!req) {
                 continue;
             }
@@ -970,9 +1189,17 @@ struct TOtelLogsServer::TImpl {
         StopPipeline.store(false, std::memory_order_release);
         StopSweeper.store(false, std::memory_order_release);
         const size_t nWorkers = Max<size_t>(size_t(1), Cfg.IngestWorkers);
+        const size_t nFlushWorkers = ResolveYdbFlushWorkers(Cfg);
+        Metrics->SetIngestQueueCapacity(Cfg.IngestQueueMax);
+        Metrics->SetIngestWorkersTotal(nWorkers);
+        Metrics->SetYdbFlushWorkersTotal(nFlushWorkers);
         Workers.reserve(nWorkers);
         for (size_t i = 0; i < nWorkers; ++i) {
             Workers.emplace_back([this] { WorkerLoop(); });
+        }
+        FlushWorkers.reserve(nFlushWorkers);
+        for (size_t i = 0; i < nFlushWorkers; ++i) {
+            FlushWorkers.emplace_back([this] { YdbFlushWorkerLoop(); });
         }
         Sweeper_ = std::thread([this] { SweeperLoop(); });
 
@@ -1000,7 +1227,8 @@ struct TOtelLogsServer::TImpl {
         }
         std::cerr << "otel_logs_to_ydb listening grpc://" << Cfg.ListenAddress << " ydb=" << Cfg.YdbEndpoint
                   << " db=" << Cfg.YdbDatabase << " prefix=" << Cfg.TablesPrefix << " layout=" << Cfg.TableLayout
-                  << " ingest_queue=" << Cfg.IngestQueueMax << " workers=" << nWorkers << " ydb_max_concurrent_bulk="
+                  << " ingest_queue=" << Cfg.IngestQueueMax << " workers=" << nWorkers << " flush_queue="
+                  << Cfg.FlushQueueMax << " ydb_flush_workers=" << nFlushWorkers << " ydb_max_concurrent_bulk="
                   << Cfg.YdbMaxConcurrentBulkUpserts << " export_routable_wire_precheck="
                   << (Cfg.ExportRoutableWirePrecheck ? "true" : "false") << " allowed_projects=";
         if (Cfg.AllowedProjects.empty()) {
@@ -1029,9 +1257,6 @@ struct TOtelLogsServer::TImpl {
         }
         StopPipeline.store(true, std::memory_order_release);
         StopSweeper.store(true, std::memory_order_release);
-        if (Sweeper_.joinable()) {
-            Sweeper_.join();
-        }
         Queue.Stop();
         for (std::thread& t : Workers) {
             if (t.joinable()) {
@@ -1039,7 +1264,17 @@ struct TOtelLogsServer::TImpl {
             }
         }
         Workers.clear();
+        if (Sweeper_.joinable()) {
+            Sweeper_.join();
+        }
         DrainAllShardBuffers();
+        FlushQueue.Stop();
+        for (std::thread& t : FlushWorkers) {
+            if (t.joinable()) {
+                t.join();
+            }
+        }
+        FlushWorkers.clear();
         if (MetricsServer) {
             MetricsServer->Stop();
             MetricsServer.reset();
@@ -1091,6 +1326,8 @@ public:
             Finish(grpc::Status::OK);
             return;
         }
+
+        Impl_->Metrics->AddIngestOfferBytes(protoBytes);
 
         TIngestWirePayload payload;
         payload.Buf = std::move(ReadBuf_);
@@ -1159,12 +1396,9 @@ void TOtelLogsServer::TImpl::ProcessExport(const ologs::ExportLogsServiceRequest
         if (hasFilter && !allowed.contains(ps.Project)) {
             continue;
         }
-        TString cluster;
-        THashMap<TString, TString> rlab;
-        THashMap<TString, TString> rmeta;
-        SplitResourceAttributes(rl.resource(), &cluster, &rlab, &rmeta);
+        const TResourceRowCtx resCtx = BuildResourceRowCtx(rl.resource(), ps);
 
-        const TRoutedTable route = ResolveLogsTable(Cfg, ps.Project, ps.Service, cluster, perProject);
+        const TRoutedTable route = ResolveLogsTable(Cfg, ps.Project, ps.Service, resCtx.Cluster, perProject);
         if (route.Drop) {
             continue;
         }
@@ -1173,7 +1407,7 @@ void TOtelLogsServer::TImpl::ProcessExport(const ologs::ExportLogsServiceRequest
 
         for (const ScopeLogs& sl : rl.scope_logs()) {
             for (const LogRecord& lr : sl.log_records()) {
-                TOwnedLogRow row = MakeOwnedLogRow(rl, lr);
+                TOwnedLogRow row = MakeOwnedLogRow(resCtx, lr);
                 TBuck bk;
                 bk.Table = route.TablePath;
                 bk.Schema = route.PkSchema;
@@ -1186,84 +1420,160 @@ void TOtelLogsServer::TImpl::ProcessExport(const ologs::ExportLogsServiceRequest
         }
     }
 
-    for (auto& it : buckets) {
-        AppendOwnedShard(it.first, std::move(it.second));
-    }
+    AppendOwnedShards(std::move(buckets));
 }
 
-void TOtelLogsServer::TImpl::AppendOwnedShard(const TBuck& buck, TVector<TOwnedLogRow>&& chunk) {
-    if (chunk.empty()) {
+void TOtelLogsServer::TImpl::RegisterPendingSweep(TShardBuffer* buf) {
+    std::lock_guard<std::mutex> g(PendingSweepMu_);
+    PendingSweep_.insert(buf);
+}
+
+void TOtelLogsServer::TImpl::UnregisterPendingSweep(TShardBuffer* buf) {
+    std::lock_guard<std::mutex> g(PendingSweepMu_);
+    PendingSweep_.erase(buf);
+}
+
+void TOtelLogsServer::TImpl::AppendOwnedShards(THashMap<TBuck, TVector<TOwnedLogRow>, TBuckHash>&& buckets) {
+    if (buckets.empty()) {
         return;
     }
-    TShardBuffer* buf = nullptr;
+
+    TVector<std::pair<TShardBuffer*, TVector<TOwnedLogRow>*>> work;
+    work.reserve(buckets.size());
     {
-        std::lock_guard<std::mutex> g(ShardBufMapMu_);
-        std::unique_ptr<TShardBuffer>& slot = ShardBuf_[buck];
-        if (!slot) {
-            slot = std::make_unique<TShardBuffer>();
-        }
-        buf = slot.get();
-    }
-    {
-        std::lock_guard<std::mutex> g(buf->Mu);
-        const bool wasEmpty = buf->Rows.empty();
-        for (auto& r : chunk) {
-            buf->ApproxBytes += OwnedRowApproxBytes(r);
-            buf->Rows.push_back(std::move(r));
-        }
-        if (wasEmpty && !buf->Rows.empty()) {
-            buf->BufferOpenSince = TInstant::Now();
+        std::unique_lock<std::shared_mutex> lock(ShardBufMapMu_);
+        for (auto& it : buckets) {
+            if (it.second.empty()) {
+                continue;
+            }
+            std::unique_ptr<TShardBuffer>& slot = ShardBuf_[it.first];
+            if (!slot) {
+                slot = std::make_unique<TShardBuffer>(it.first);
+            }
+            work.emplace_back(slot.get(), &it.second);
         }
     }
-    TryFlushShardBuffer(buck, buf);
+
+    for (auto& [buf, chunk] : work) {
+        ui64 chunkBytes = 0;
+        for (const TOwnedLogRow& r : *chunk) {
+            chunkBytes += OwnedRowApproxBytes(r);
+        }
+
+        bool registerSweep = false;
+        {
+            std::lock_guard<std::mutex> g(buf->Mu);
+            const bool wasEmpty = buf->Rows.empty();
+            buf->ApproxBytes += chunkBytes;
+            for (auto& r : *chunk) {
+                buf->Rows.push_back(std::move(r));
+            }
+            if (wasEmpty && !buf->Rows.empty()) {
+                buf->PendingSince = TInstant::Now();
+                registerSweep = true;
+            }
+        }
+        if (registerSweep) {
+            RegisterPendingSweep(buf);
+        }
+        TryFlushShardBuffer(buf);
+    }
 }
 
-void TOtelLogsServer::TImpl::TryFlushShardBuffer(const TBuck& buck, TShardBuffer* buf) {
+void TOtelLogsServer::TImpl::TryFlushShardBuffer(TShardBuffer* buf) {
     constexpr size_t kHardMaxRows = 5'000'000;
+    const TInstant now = TInstant::Now();
+    const ui64 flushIntervalSec = Cfg.ShardBufferFlushIntervalSec;
+    const size_t minFlushRecords = Cfg.ShardBufferMinFlushRecords > 0 ? static_cast<size_t>(Cfg.ShardBufferMinFlushRecords) : 0;
+    const ui64 minFlushBytes = Cfg.ShardBufferMinFlushBytes > 0 ? static_cast<ui64>(Cfg.ShardBufferMinFlushBytes) : 0;
+
     for (;;) {
         TVector<TOwnedLogRow> out;
+        TVector<TOwnedLogRow> restRows;
+        bool recalcApprox = false;
+        bool unregisterSweep = false;
+
         {
             std::lock_guard<std::mutex> g(buf->Mu);
             if (buf->Rows.empty()) {
-                buf->BufferOpenSince = TInstant::Zero();
-                return;
+                buf->PendingSince = TInstant::Zero();
+                unregisterSweep = true;
+                break;
             }
-            const bool needSize = (Cfg.ShardBufferMinFlushRecords > 0
-                                      && buf->Rows.size() >= static_cast<size_t>(Cfg.ShardBufferMinFlushRecords))
-                || (Cfg.ShardBufferMinFlushBytes > 0 && buf->ApproxBytes >= static_cast<ui64>(Cfg.ShardBufferMinFlushBytes));
-            const bool needTime = Cfg.ShardBufferFlushIntervalSec > 0 && buf->BufferOpenSince != TInstant::Zero()
-                && (TInstant::Now() - buf->BufferOpenSince)
-                    >= TDuration::Seconds(static_cast<ui32>(Cfg.ShardBufferFlushIntervalSec));
-            const bool needHard = buf->Rows.size() >= kHardMaxRows;
+
+            const size_t rowCount = buf->Rows.size();
+            const bool needSize = (minFlushRecords > 0 && rowCount >= minFlushRecords)
+                || (minFlushBytes > 0 && buf->ApproxBytes >= minFlushBytes);
+            const bool needTime = NeedsYdbWaitFlush(
+                rowCount,
+                buf->PendingSince,
+                buf->LastYdbFlushOk,
+                flushIntervalSec,
+                now);
+            const bool needHard = rowCount >= kHardMaxRows;
             if (!needSize && !needTime && !needHard) {
-                return;
+                break;
             }
-            if (needHard && buf->Rows.size() > kHardMaxRows) {
+
+            if (needHard && rowCount > kHardMaxRows) {
                 out.reserve(kHardMaxRows);
                 for (size_t i = 0; i < kHardMaxRows; ++i) {
                     out.push_back(std::move(buf->Rows[i]));
                 }
-                TVector<TOwnedLogRow> rest;
-                rest.reserve(buf->Rows.size() - kHardMaxRows);
-                for (size_t i = kHardMaxRows; i < buf->Rows.size(); ++i) {
-                    rest.push_back(std::move(buf->Rows[i]));
+                restRows.reserve(rowCount - kHardMaxRows);
+                for (size_t i = kHardMaxRows; i < rowCount; ++i) {
+                    restRows.push_back(std::move(buf->Rows[i]));
                 }
-                buf->Rows = std::move(rest);
+                buf->Rows.clear();
                 buf->ApproxBytes = 0;
-                for (const auto& r : buf->Rows) {
-                    buf->ApproxBytes += OwnedRowApproxBytes(r);
-                }
+                recalcApprox = true;
             } else {
                 out = std::move(buf->Rows);
                 buf->ApproxBytes = 0;
-                buf->BufferOpenSince = TInstant::Zero();
+                buf->PendingSince = TInstant::Zero();
+                unregisterSweep = true;
             }
         }
-        BulkUpsertOwnedRows(buck, std::move(out));
+
+        if (unregisterSweep) {
+            UnregisterPendingSweep(buf);
+        }
+
+        if (recalcApprox) {
+            const ui64 restBytes = SumOwnedRowsApproxBytes(restRows);
+            std::lock_guard<std::mutex> g(buf->Mu);
+            buf->Rows = std::move(restRows);
+            buf->ApproxBytes = restBytes;
+        }
+
+        if (out.empty()) {
+            break;
+        }
+
+        TFlushWorkItem item;
+        item.Buck = buf->Buck;
+        item.Rows = std::move(out);
+        item.BufForFlushOk = buf;
+        EnqueueFlushWork(std::move(item));
     }
 }
 
-void TOtelLogsServer::TImpl::BulkUpsertOwnedRows(const TBuck& buck, TVector<TOwnedLogRow>&& rows) {
+void TOtelLogsServer::TImpl::EnqueueFlushWork(TFlushWorkItem item) {
+    FlushQueue.PushBlocking(std::move(item));
+}
+
+void TOtelLogsServer::TImpl::YdbFlushWorkerLoop() {
+    for (;;) {
+        TFlushWorkItem item;
+        if (!FlushQueue.WaitPop(&item)) {
+            return;
+        }
+        const TYdbFlushWorkerBusyGuard busy(Metrics.get());
+        BulkUpsertOwnedRows(item.Buck, std::move(item.Rows), item.BufForFlushOk);
+    }
+}
+
+void TOtelLogsServer::TImpl::BulkUpsertOwnedRows(const TBuck& buck, TVector<TOwnedLogRow>&& rows, TShardBuffer* bufForFlushOk) {
     if (rows.empty()) {
         return;
     }
@@ -1309,10 +1619,14 @@ void TOtelLogsServer::TImpl::BulkUpsertOwnedRows(const TBuck& buck, TVector<TOwn
             if (res.IsSuccess()) {
                 Metrics->IncBulkOk();
                 Metrics->IncLogsBatchesStored();
-                Metrics->AddYdbWritten(nrows, nrows * 400);
+                Metrics->AddYdbWritten(nrows, static_cast<ui64>(schemaWire.size() + dataWire.size()));
                 Metrics->ObserveBulkArrowEncodeMs(encodeMs);
                 Metrics->ObserveBulkYdbRpcMs(rpcMs);
                 Metrics->ObserveBulkUpsertRows(nrows);
+                if (bufForFlushOk) {
+                    std::lock_guard<std::mutex> fg(bufForFlushOk->Mu);
+                    bufForFlushOk->LastYdbFlushOk = TInstant::Now();
+                }
                 break;
             }
             const TString issues = res.GetIssues().ToOneLineString();
@@ -1337,66 +1651,79 @@ void TOtelLogsServer::TImpl::BulkUpsertOwnedRows(const TBuck& buck, TVector<TOwn
 }
 
 void TOtelLogsServer::TImpl::SweepShardBuffersIdle() {
-    TVector<TBuck> keys;
+    TVector<TShardBuffer*> targets;
     {
-        std::lock_guard<std::mutex> g(ShardBufMapMu_);
-        keys.reserve(ShardBuf_.size());
-        for (const auto& kv : ShardBuf_) {
-            keys.push_back(kv.first);
+        std::lock_guard<std::mutex> g(PendingSweepMu_);
+        targets.reserve(PendingSweep_.size());
+        for (TShardBuffer* buf : PendingSweep_) {
+            targets.push_back(buf);
         }
     }
-    for (const TBuck& buck : keys) {
-        TShardBuffer* buf = nullptr;
-        {
-            std::lock_guard<std::mutex> g(ShardBufMapMu_);
-            auto it = ShardBuf_.find(buck);
-            if (it == ShardBuf_.end() || !it->second) {
-                continue;
-            }
-            buf = it->second.get();
-        }
-        TryFlushShardBuffer(buck, buf);
+    for (TShardBuffer* buf : targets) {
+        TryFlushShardBuffer(buf);
     }
 }
 
 void TOtelLogsServer::TImpl::DrainAllShardBuffers() {
-    TVector<TBuck> keys;
+    TVector<TShardBuffer*> buffers;
     {
-        std::lock_guard<std::mutex> g(ShardBufMapMu_);
-        keys.reserve(ShardBuf_.size());
+        std::shared_lock<std::shared_mutex> lock(ShardBufMapMu_);
+        buffers.reserve(ShardBuf_.size());
         for (const auto& kv : ShardBuf_) {
-            keys.push_back(kv.first);
+            if (kv.second) {
+                buffers.push_back(kv.second.get());
+            }
         }
     }
-    for (const TBuck& buck : keys) {
+    for (TShardBuffer* buf : buffers) {
         for (;;) {
-            TShardBuffer* buf = nullptr;
-            {
-                std::lock_guard<std::mutex> g(ShardBufMapMu_);
-                auto it = ShardBuf_.find(buck);
-                if (it == ShardBuf_.end() || !it->second) {
-                    break;
-                }
-                buf = it->second.get();
-            }
             TVector<TOwnedLogRow> out;
+            bool unregisterSweep = false;
             {
                 std::lock_guard<std::mutex> bg(buf->Mu);
                 if (buf->Rows.empty()) {
+                    unregisterSweep = true;
                     break;
                 }
                 out = std::move(buf->Rows);
                 buf->ApproxBytes = 0;
-                buf->BufferOpenSince = TInstant::Zero();
+                buf->PendingSince = TInstant::Zero();
+                unregisterSweep = true;
             }
-            BulkUpsertOwnedRows(buck, std::move(out));
+            if (unregisterSweep) {
+                UnregisterPendingSweep(buf);
+            }
+            TFlushWorkItem item;
+            item.Buck = buf->Buck;
+            item.Rows = std::move(out);
+            item.BufForFlushOk = buf;
+            EnqueueFlushWork(std::move(item));
         }
+    }
+    {
+        std::lock_guard<std::mutex> g(PendingSweepMu_);
+        PendingSweep_.clear();
     }
 }
 
+static std::chrono::milliseconds StaleSweepPeriodMs(ui64 intervalSec) {
+    if (intervalSec == 0) {
+        return std::chrono::seconds(1);
+    }
+    ui64 ms = intervalSec * 100U;
+    if (ms < 100) {
+        ms = 100;
+    }
+    if (ms > 1000) {
+        ms = 1000;
+    }
+    return std::chrono::milliseconds(ms);
+}
+
 void TOtelLogsServer::TImpl::SweeperLoop() {
+    const auto period = StaleSweepPeriodMs(Cfg.ShardBufferFlushIntervalSec);
     while (!StopSweeper.load(std::memory_order_acquire)) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::this_thread::sleep_for(period);
         SweepShardBuffersIdle();
     }
 }

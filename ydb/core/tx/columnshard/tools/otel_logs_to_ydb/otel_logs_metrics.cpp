@@ -1,8 +1,10 @@
 #include "otel_logs_metrics.h"
 
+#include <util/generic/utility.h>
 #include <util/stream/str.h>
 #include <util/string/builder.h>
 
+#include <algorithm>
 #include <fstream>
 
 #if defined(__linux__)
@@ -171,7 +173,10 @@ TString TPrometheusMetrics::RenderText() const {
        << "# HELP otel_logs_to_ydb_log_rows_pipeline_in_total Log records enqueued to internal pipeline\n"
        << "# TYPE otel_logs_to_ydb_log_rows_pipeline_in_total counter\n"
        << "otel_logs_to_ydb_log_rows_pipeline_in_total{" << rl << "} " << LogRowsPipelineIn_.load() << "\n"
-       << "# HELP otel_logs_to_ydb_log_bytes_pipeline_in_total OTLP protobuf bytes enqueued (ByteSizeLong)\n"
+       << "# HELP otel_logs_to_ydb_log_bytes_ingest_offer_total OTLP wire bytes offered to ingest queue after routable wire precheck (if enabled), immediately before TryPush; includes batches rejected when queue is full\n"
+       << "# TYPE otel_logs_to_ydb_log_bytes_ingest_offer_total counter\n"
+       << "otel_logs_to_ydb_log_bytes_ingest_offer_total{" << rl << "} " << LogBytesIngestOffer_.load() << "\n"
+       << "# HELP otel_logs_to_ydb_log_bytes_pipeline_in_total OTLP wire bytes counted in ingest worker after successful parse (Buf.Length per dequeued batch)\n"
        << "# TYPE otel_logs_to_ydb_log_bytes_pipeline_in_total counter\n"
        << "otel_logs_to_ydb_log_bytes_pipeline_in_total{" << rl << "} " << LogBytesPipelineIn_.load() << "\n"
        << "# HELP otel_logs_to_ydb_log_rows_refused_total Log records in batches rejected (queue full)\n"
@@ -183,16 +188,41 @@ TString TPrometheusMetrics::RenderText() const {
        << "# HELP otel_logs_to_ydb_log_rows_ydb_written_total Log rows successfully written via BulkUpsert\n"
        << "# TYPE otel_logs_to_ydb_log_rows_ydb_written_total counter\n"
        << "otel_logs_to_ydb_log_rows_ydb_written_total{" << rl << "} " << LogRowsYdbWritten_.load() << "\n"
-       << "# HELP otel_logs_to_ydb_log_bytes_ydb_written_total Approximate payload bytes written (heuristic)\n"
+       << "# HELP otel_logs_to_ydb_log_bytes_ydb_written_total Arrow BulkUpsert wire bytes (schema IPC + data IPC per successful chunk)\n"
        << "# TYPE otel_logs_to_ydb_log_bytes_ydb_written_total counter\n"
        << "otel_logs_to_ydb_log_bytes_ydb_written_total{" << rl << "} " << LogBytesYdbWritten_.load() << "\n"
 
        << "# HELP otel_logs_to_ydb_grpc_export_rpc_inflight Concurrent gRPC Export handlers before response\n"
        << "# TYPE otel_logs_to_ydb_grpc_export_rpc_inflight gauge\n"
        << "otel_logs_to_ydb_grpc_export_rpc_inflight{" << rl << "} " << GrpcExportRpcInflight_.load() << "\n"
-       << "# HELP otel_logs_to_ydb_ingest_queue_depth Current depth of internal ingest queue\n"
+       << "# HELP otel_logs_to_ydb_ingest_queue_depth Wire batches waiting for ingest workers (0..capacity)\n"
        << "# TYPE otel_logs_to_ydb_ingest_queue_depth gauge\n"
        << "otel_logs_to_ydb_ingest_queue_depth{" << rl << "} " << IngestQueueDepth_.load() << "\n"
+       // Disabled temporarily (suspected interaction with ingest hot path); re-enable in otel_logs_metrics.cpp when stable.
+       // << "# HELP otel_logs_to_ydb_ingest_queue_capacity Max ingest queue size (ingest_queue_max)\n"
+       // << "# TYPE otel_logs_to_ydb_ingest_queue_capacity gauge\n"
+       // << "otel_logs_to_ydb_ingest_queue_capacity{" << rl << "} " << IngestQueueCapacity_.load() << "\n"
+       // << "# HELP otel_logs_to_ydb_ingest_workers_total Ingest worker threads (ingest_workers)\n"
+       // << "# TYPE otel_logs_to_ydb_ingest_workers_total gauge\n"
+       // << "otel_logs_to_ydb_ingest_workers_total{" << rl << "} " << IngestWorkersTotal_.load() << "\n"
+       << "# HELP otel_logs_to_ydb_ingest_workers_busy Ingest workers handling a dequeued batch (parse through ProcessExport; idle only in WaitPop)\n"
+       << "# TYPE otel_logs_to_ydb_ingest_workers_busy gauge\n"
+       << "otel_logs_to_ydb_ingest_workers_busy{" << rl << "} " << IngestWorkersBusy_.load() << "\n"
+       << "# HELP otel_logs_to_ydb_ydb_flush_queue_depth Shard flush chunks waiting for YDB writer threads\n"
+       << "# TYPE otel_logs_to_ydb_ydb_flush_queue_depth gauge\n"
+       << "otel_logs_to_ydb_ydb_flush_queue_depth{" << rl << "} " << YdbFlushQueueDepth_.load() << "\n"
+       << "# HELP otel_logs_to_ydb_ydb_flush_workers_busy YDB flush worker threads executing BulkUpsert\n"
+       << "# TYPE otel_logs_to_ydb_ydb_flush_workers_busy gauge\n"
+       << "otel_logs_to_ydb_ydb_flush_workers_busy{" << rl << "} " << YdbFlushWorkersBusy_.load() << "\n"
+       << "# HELP otel_logs_to_ydb_ydb_bulk_write_inflight Active YDB BulkUpsert slots (ydb_max_concurrent_bulk)\n"
+       << "# TYPE otel_logs_to_ydb_ydb_bulk_write_inflight gauge\n"
+       << "otel_logs_to_ydb_ydb_bulk_write_inflight{" << rl << "} " << YdbBulkWriteInflight_.load() << "\n"
+       // << "# HELP otel_logs_to_ydb_shard_buffer_log_rows Log rows buffered before shard flush to YDB\n"
+       // << "# TYPE otel_logs_to_ydb_shard_buffer_log_rows gauge\n"
+       // << "otel_logs_to_ydb_shard_buffer_log_rows{" << rl << "} " << ShardBufferLogRows_.load() << "\n"
+       // << "# HELP otel_logs_to_ydb_shard_buffers_active Active (table, shard) shard buffers with pending rows\n"
+       // << "# TYPE otel_logs_to_ydb_shard_buffers_active gauge\n"
+       // << "otel_logs_to_ydb_shard_buffers_active{" << rl << "} " << ShardBuffersActive_.load() << "\n"
 
        << "# HELP otel_logs_to_ydb_grpc_export_request_bytes_total ByteSizeLong of each ExportLogsServiceRequest (uncompressed proto)\n"
        << "# TYPE otel_logs_to_ydb_grpc_export_request_bytes_total counter\n"

@@ -1,5 +1,8 @@
 #include "otel_logs_ddl.h"
 
+#include <cctype>
+#include <iostream>
+
 #include <util/generic/strbuf.h>
 #include <util/string/builder.h>
 
@@ -7,10 +10,81 @@ namespace NColumnShard::NOtelLogsToYdb {
 
 namespace {
 
+/// Go `durationToYDBIntervalLiteral`: YAML `48h` / `720h` → ISO 8601 for `Interval("...")`.
+TString DurationLiteralToYdbIsoInterval(TStringBuf lit) {
+    TString s(lit);
+    while (!s.empty() && (s[0] == ' ' || s[0] == '\t')) {
+        s.erase(0, 1);
+    }
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) {
+        s.pop_back();
+    }
+    if (s.empty()) {
+        return TString{"P30D"};
+    }
+    if (s[0] == 'P' || s[0] == 'p') {
+        return s;
+    }
+    ui64 value = 0;
+    size_t i = 0;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+        value = value * 10 + static_cast<ui64>(s[i] - '0');
+        ++i;
+    }
+    if (i >= s.size()) {
+        return TString{"PT24H"};
+    }
+    const char unit = static_cast<char>(tolower(static_cast<unsigned char>(s[i])));
+    ui64 seconds = 0;
+    switch (unit) {
+        case 'h':
+            seconds = value * 3600;
+            break;
+        case 'd':
+            seconds = value * 86400;
+            break;
+        case 'm':
+            seconds = value * 60;
+            break;
+        case 's':
+            seconds = value;
+            break;
+        default:
+            return TString{"PT24H"};
+    }
+    if (seconds >= 86400 && seconds % 86400 == 0) {
+        const ui64 days = seconds / 86400;
+        return TStringBuilder() << "P" << days << "D";
+    }
+    if (seconds >= 3600 && seconds % 3600 == 0) {
+        const ui64 hours = seconds / 3600;
+        return TStringBuilder() << "PT" << hours << "H";
+    }
+    return TStringBuilder() << "PT" << seconds << "S";
+}
+
 const char* DefaultCompactionJson = R"({"levels": [
    {"class_name": "Zero", "expected_blobs_size": 2097152, "portions_count_limit": 15000000, "portions_live_duration": "180s", "concurrency": 2},
    {"class_name": "Zero", "expected_blobs_size": 8388608, "portions_count_limit": 15000000}
 ], "node_portions_count_limit": 15000000})";
+
+void LogDdlQuery(TStringBuf step, const TString& tablePath, const TString& yql) {
+    std::cerr << "Auto-DDL " << step << " table=" << tablePath << " yql:\n" << yql << std::endl;
+}
+
+void LogDdlBundle(
+    TStringBuf failedStep,
+    const TString& tablePath,
+    const TString& create,
+    const TString& ttl,
+    const TString& compaction)
+{
+    std::cerr << "Auto-DDL bundle (failed at " << failedStep << ") table=" << tablePath << ":\n"
+              << "--- create ---\n"
+              << create << "--- ttl ---\n"
+              << ttl << "--- compaction ---\n"
+              << compaction << std::endl;
+}
 
 } // namespace
 
@@ -74,18 +148,18 @@ TString TDdlEnsurer::BuildCreateDdl(const TString& tablePath, ELogsPkSchema sche
 }
 
 TString TDdlEnsurer::BuildTtlDdl(const TString& tablePath) const {
-    TString del = TString{Cfg_.TtlDeleteIntervalLiteral.data(), Cfg_.TtlDeleteIntervalLiteral.size()};
-    if (del.empty()) {
-        del = TString{"P30D"};
-    }
+    const TString del = DurationLiteralToYdbIsoInterval(TStringBuf{
+        Cfg_.TtlDeleteIntervalLiteral.data(), Cfg_.TtlDeleteIntervalLiteral.size()});
     if (!Cfg_.TtlExternalPath.empty() && !Cfg_.TtlExternalTierLiteral.empty()) {
-        const TStringBuf tier(Cfg_.TtlExternalTierLiteral.data(), Cfg_.TtlExternalTierLiteral.size());
+        const TString tier = DurationLiteralToYdbIsoInterval(TStringBuf{
+            Cfg_.TtlExternalTierLiteral.data(), Cfg_.TtlExternalTierLiteral.size()});
         const TStringBuf extPath(Cfg_.TtlExternalPath.data(), Cfg_.TtlExternalPath.size());
+        // Go: `SOURCE `%s`, Interval` — path in backticks, then comma (not `\"` after path).
         return TStringBuilder() << "ALTER TABLE `" << tablePath << "` SET (TTL = Interval(\"" << tier
-                                << "\") TO EXTERNAL DATA SOURCE `" << extPath << "\", Interval(\"" << del
-                                << "\") DELETE ON `timestamp`);";
+                                << "\") TO EXTERNAL DATA SOURCE `" << extPath << "`, Interval(\"" << del
+                                << "\") DELETE ON timestamp);\n";
     }
-    return TStringBuilder() << "ALTER TABLE `" << tablePath << "` SET (TTL = Interval(\"" << del << "\") ON `timestamp`);";
+    return TStringBuilder() << "ALTER TABLE `" << tablePath << "` SET (TTL = Interval(\"" << del << "\") ON timestamp);\n";
 }
 
 TString TDdlEnsurer::BuildCompactionDdl(const TString& tablePath) const {
@@ -98,12 +172,19 @@ TString TDdlEnsurer::BuildCompactionDdl(const TString& tablePath) const {
                             << j << "`);";
 }
 
-bool TDdlEnsurer::ExecScheme(NYdb::NTable::TTableClient& client, const TString& yql, TString* err) {
+bool TDdlEnsurer::ExecScheme(
+    NYdb::NTable::TTableClient& client,
+    TStringBuf step,
+    const TString& tablePath,
+    const TString& yql,
+    TString* err)
+{
     auto s = client.GetSession().ExtractValueSync();
     if (!s.IsSuccess()) {
         if (err) {
             *err = TStringBuilder() << "GetSession: " << s.GetIssues().ToOneLineString();
         }
+        LogDdlQuery(step, tablePath, yql);
         return false;
     }
     NYdb::NTable::TSession session = s.GetSession();
@@ -112,6 +193,7 @@ bool TDdlEnsurer::ExecScheme(NYdb::NTable::TTableClient& client, const TString& 
         if (err) {
             *err = TStringBuilder() << "ExecuteSchemeQuery: " << r.GetIssues().ToOneLineString();
         }
+        LogDdlQuery(step, tablePath, yql);
         return false;
     }
     return true;
@@ -127,26 +209,31 @@ bool TDdlEnsurer::EnsureLogsTable(NYdb::NTable::TTableClient& client, const TStr
     }
     TString e;
     const TString create = BuildCreateDdl(tablePath, schema);
-    if (!ExecScheme(client, create, &e)) {
+    const TString ttl = BuildTtlDdl(tablePath);
+    const TString compaction = BuildCompactionDdl(tablePath);
+    if (!ExecScheme(client, "create table", tablePath, create, &e)) {
         TStringBuf eb(e);
         const bool already = eb.Contains("AlreadyExists") || eb.Contains("already exists") || eb.Contains("ALREADY_EXISTS");
         if (!already) {
             if (err) {
-                *err = e;
+                *err = TStringBuilder() << "create table: " << e;
             }
+            LogDdlBundle("create table", tablePath, create, ttl, compaction);
             return false;
         }
     }
-    if (!ExecScheme(client, BuildTtlDdl(tablePath), &e)) {
+    if (!ExecScheme(client, "set ttl", tablePath, ttl, &e)) {
         if (err) {
-            *err = e;
+            *err = TStringBuilder() << "set ttl: " << e;
         }
+        LogDdlBundle("set ttl", tablePath, create, ttl, compaction);
         return false;
     }
-    if (!ExecScheme(client, BuildCompactionDdl(tablePath), &e)) {
+    if (!ExecScheme(client, "set compaction", tablePath, compaction, &e)) {
         if (err) {
-            *err = e;
+            *err = TStringBuilder() << "set compaction: " << e;
         }
+        LogDdlBundle("set compaction", tablePath, create, ttl, compaction);
         return false;
     }
     std::lock_guard<std::mutex> g(Mu_);

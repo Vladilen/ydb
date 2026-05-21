@@ -33,6 +33,10 @@ struct TServerConfig {
     std::string TableLayout = "per_service";
     std::vector<std::string> AllowedProjects;
     int YdbMaxConcurrentBulkUpserts = 24;
+    /// Dedicated threads for shard flush → BulkUpsert (0 = auto from `ydb_max_concurrent_bulk`).
+    size_t YdbFlushWorkers = 0;
+    /// Bounded queue of flush chunks between ingest workers and YDB writers.
+    size_t FlushQueueMax = 4096;
     std::string HealthListen = "0.0.0.0:13133";
     std::string HealthPath = "/ping";
 

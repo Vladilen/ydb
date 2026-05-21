@@ -163,6 +163,8 @@ bool LoadOtelLogsYaml(const TString& path, TServerConfig* cfg, TString* errorMsg
         cfg->ShardBufferMinFlushBytes = minFlushBytes;
         cfg->SupplierPoolSize = NodeAsInt(n["supplier_pool_size"], cfg->SupplierPoolSize);
         cfg->YdbMaxConcurrentBulkUpserts = NodeAsInt(n["ydb_max_concurrent_bulk"], cfg->YdbMaxConcurrentBulkUpserts);
+        cfg->YdbFlushWorkers = static_cast<size_t>(Max<i64>(0, NodeAsInt64(n["ydb_flush_workers"], static_cast<i64>(cfg->YdbFlushWorkers))));
+        cfg->FlushQueueMax = static_cast<size_t>(Max<i64>(1, NodeAsInt64(n["flush_queue_max"], static_cast<i64>(cfg->FlushQueueMax))));
         cfg->PartitionCountCommon = NodeAsInt(n["auto_create_partition_count_common"], cfg->PartitionCountCommon);
         cfg->PartitionCountDedicated = NodeAsInt(n["auto_create_partition_count_dedicated"], cfg->PartitionCountDedicated);
         cfg->AutoCreateMissingTables = NodeAsBool(n["auto_create_missing_tables"], cfg->AutoCreateMissingTables);

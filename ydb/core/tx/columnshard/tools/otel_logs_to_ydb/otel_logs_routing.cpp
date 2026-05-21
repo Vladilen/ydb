@@ -16,14 +16,12 @@ TString SanitizeSeg(TStringBuf s) {
     return r;
 }
 
+/// Same as Go `joinYdbTablePath`: keep leading `/` on the first segment (prefix), trim only inner slashes.
 TString JoinParts(std::initializer_list<TStringBuf> parts) {
     TStringBuilder out;
     bool first = true;
     for (TStringBuf p : parts) {
         TStringBuf x = p;
-        while (!x.empty() && x[0] == '/') {
-            x.Skip(1);
-        }
         while (!x.empty() && x.back() == '/') {
             x.Chop(1);
         }
@@ -31,12 +29,22 @@ TString JoinParts(std::initializer_list<TStringBuf> parts) {
             continue;
         }
         if (!first) {
+            while (!x.empty() && x[0] == '/') {
+                x.Skip(1);
+            }
+            if (x.empty()) {
+                continue;
+            }
             out << '/';
         }
         first = false;
         out << x;
     }
-    return TString{out};
+    TString result{out};
+    if (!result.empty() && result[0] != '/') {
+        result = TString("/") + result;
+    }
+    return result;
 }
 
 TString JoinLogsPath(const TString& prefix, const TString& logsDirSeg, const TString& suffix) {

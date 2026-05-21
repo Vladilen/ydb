@@ -23,7 +23,12 @@ private:
     TString BuildTtlDdl(const TString& tablePath) const;
     TString BuildCompactionDdl(const TString& tablePath) const;
 
-    bool ExecScheme(NYdb::NTable::TTableClient& client, const TString& yql, TString* err);
+    bool ExecScheme(
+        NYdb::NTable::TTableClient& client,
+        TStringBuf step,
+        const TString& tablePath,
+        const TString& yql,
+        TString* err);
 
     TServerConfig Cfg_;
     std::mutex Mu_;
