@@ -36,5 +36,5 @@
 
 ## Метрики Prometheus
 
-- Полная матрица **Go `otelcol_*` ↔ C++ `otel_logs_to_ydb_*`**: [METRICS_PARITY.md](METRICS_PARITY.md) (в т.ч. эвристика **`log_bytes_ydb_written` ≈ 400 байт на строку** за чанк).
+- Полная матрица **Go `otelcol_*` ↔ C++ `otel_logs_to_ydb_*`**: [METRICS_PARITY.md](METRICS_PARITY.md) (в т.ч. **`log_bytes_ydb_written` = len(Arrow schema IPC)+len(data IPC)** за чанк).
 - Метрики процесса / Go runtime (`otelcol_process_*`, `otelcol_runtime_*`) **не дублируются** в бинарнике: для CPU, RSS, GC, goroutines используйте **node_exporter** (или аналог на хосте) и внешние дашборды.
