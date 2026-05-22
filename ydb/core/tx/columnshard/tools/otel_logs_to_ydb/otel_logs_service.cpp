@@ -7,6 +7,9 @@
 #include "otel_logs_routing.h"
 #include "otel_logs_shard_hash.h"
 #include "otel_logs_validator.h"
+#include "otel_logs_buck.h"
+#include "otel_logs_json.h"
+#include "otel_logs_wire_ingest.h"
 #include "otel_logs_wire_routable.h"
 
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/table/table.h>
@@ -190,14 +193,6 @@ void AnyValueToJsonValue(const AnyValue& v, NJson::TJsonValue* jv) {
     }
 }
 
-TString JsonStringifyMap(const THashMap<TString, TString>& m) {
-    NJson::TJsonValue root(NJson::JSON_MAP);
-    for (const auto& [k, val] : m) {
-        root.InsertValue(k, NJson::TJsonValue(val));
-    }
-    return NJson::WriteJson(&root, /*format=*/false);
-}
-
 TString BodyToMessageUtf8(const AnyValue& body) {
     TString raw;
     switch (body.value_case()) {
@@ -212,14 +207,6 @@ TString BodyToMessageUtf8(const AnyValue& body) {
         }
     }
     return Utf8Safe(std::move(raw));
-}
-
-void MergeStringMap(const THashMap<TString, TString>& src, THashMap<TString, TString>* dst) {
-    for (const auto& [k, v] : src) {
-        if (!dst->contains(k)) {
-            (*dst)[k] = v;
-        }
-    }
 }
 
 void ParseAttributes(
@@ -697,24 +684,6 @@ struct TPrometheusHttpServer {
     }
 };
 
-struct TBuck {
-    TString Table;
-    int Shard = 0;
-    ELogsPkSchema Schema = ELogsPkSchema::PerService;
-
-    bool operator==(const TBuck& o) const noexcept {
-        return Table == o.Table && Shard == o.Shard && Schema == o.Schema;
-    }
-};
-
-struct TBuckHash {
-    size_t operator()(const TBuck& k) const noexcept {
-        return CombineHashes(
-            THash<TString>()(k.Table),
-            CombineHashes(THash<int>()(k.Shard), THash<int>()(static_cast<int>(k.Schema))));
-    }
-};
-
 static ui64 OwnedRowApproxBytes(const TOwnedLogRow& r) noexcept {
     return static_cast<ui64>(r.Service.size() + r.Cluster.size() + r.RecordId.size() + r.Message.size() + r.LabelsJson.size()
         + r.MetaJson.size() + 64);
@@ -1141,6 +1110,7 @@ struct TOtelLogsServer::TImpl {
     }
 
     void ProcessExport(const ologs::ExportLogsServiceRequest& request);
+    void IngestWireBatch(grpc::ByteBuffer* buf, ui64 protoBytes);
     void AppendOwnedShards(THashMap<TBuck, TVector<TOwnedLogRow>, TBuckHash>&& buckets);
     void RegisterPendingSweep(TShardBuffer* buf);
     void UnregisterPendingSweep(TShardBuffer* buf);
@@ -1163,8 +1133,12 @@ struct TOtelLogsServer::TImpl {
                 continue;
             }
             const TIngestWorkerBusyGuard busy(Metrics.get());
-            tlsParseArena.Reset();
             const ui64 protoBytes = static_cast<ui64>(payload.Buf.Length());
+            if (Cfg.IngestWireToOwned) {
+                IngestWireBatch(&payload.Buf, protoBytes);
+                continue;
+            }
+            tlsParseArena.Reset();
             const ologs::ExportLogsServiceRequest* req = ParseExportWire(&payload.Buf, &tlsParseArena);
             if (!req) {
                 continue;
@@ -1230,7 +1204,8 @@ struct TOtelLogsServer::TImpl {
                   << " ingest_queue=" << Cfg.IngestQueueMax << " workers=" << nWorkers << " flush_queue="
                   << Cfg.FlushQueueMax << " ydb_flush_workers=" << nFlushWorkers << " ydb_max_concurrent_bulk="
                   << Cfg.YdbMaxConcurrentBulkUpserts << " export_routable_wire_precheck="
-                  << (Cfg.ExportRoutableWirePrecheck ? "true" : "false") << " allowed_projects=";
+                  << (Cfg.ExportRoutableWirePrecheck ? "true" : "false") << " ingest_wire_to_owned="
+                  << (Cfg.IngestWireToOwned ? "true" : "false") << " allowed_projects=";
         if (Cfg.AllowedProjects.empty()) {
             std::cerr << "all";
         } else {
@@ -1380,6 +1355,22 @@ private:
     TOtelLogsServer::TImpl* Impl_;
     TServerConfig Cfg_;
 };
+
+void TOtelLogsServer::TImpl::IngestWireBatch(grpc::ByteBuffer* buf, ui64 protoBytes) {
+    if (!Cfg.ExportRoutableWirePrecheck && !ExportWireHasRoutableLogRows(buf, Cfg)) {
+        return;
+    }
+    THashMap<TBuck, TVector<TOwnedLogRow>, TBuckHash> buckets;
+    TWireExportParseStats stats;
+    if (!ProcessExportWire(buf, Cfg, &buckets, &stats)) {
+        return;
+    }
+    if (stats.LogRows == 0) {
+        return;
+    }
+    Metrics->AddPipelineIn(static_cast<ui64>(stats.LogRows), protoBytes);
+    AppendOwnedShards(std::move(buckets));
+}
 
 void TOtelLogsServer::TImpl::ProcessExport(const ologs::ExportLogsServiceRequest& request) {
     const bool perProject = IsPerProjectLayout(Cfg);

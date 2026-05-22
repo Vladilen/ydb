@@ -6,12 +6,14 @@ SRCDIR(
 
 SRCS(
     health_check_server.cpp
+    otel_logs_json.cpp
     otel_logs_config.cpp
     otel_logs_ddl.cpp
     otel_logs_metrics.cpp
     otel_logs_routing.cpp
     otel_logs_shard_hash.cpp
     otel_logs_service.cpp
+    otel_logs_wire_ingest.cpp
     otel_logs_wire_routable.cpp
 )
 

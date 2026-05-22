@@ -12,7 +12,7 @@ void Usage() {
     std::cerr
         << "otel_logs_to_ydb — OTLP/gRPC logs → YDB BulkUpsert (layout compatible with observability ydb-supplier).\n"
         << "\n"
-        << "All settings come from a YAML file (see `examples/` in the tool directory).\n"
+        << "All settings come from a YAML file.\n"
         << "\n"
         << "Usage:\n"
         << "  otel_logs_to_ydb --config PATH\n"

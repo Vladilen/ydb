@@ -81,6 +81,9 @@ struct TServerConfig {
 
     /// Wire-scan Export before ingest queue (skip full parse for non-routable batches).
     bool ExportRoutableWirePrecheck = false;
+
+    /// Stage A: ingest worker parses wire → `TOwnedLogRow` (no protobuf tree). Default: false (Arena parse).
+    bool IngestWireToOwned = false;
 };
 
 /// OTLP gRPC LogsService + async pipeline → YDB BulkUpsert.
