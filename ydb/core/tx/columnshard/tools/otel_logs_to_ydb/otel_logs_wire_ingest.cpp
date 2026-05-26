@@ -1,5 +1,6 @@
 #include "otel_logs_wire_ingest.h"
 
+#include "otel_logs_anyvalue.h"
 #include "otel_logs_json.h"
 #include "otel_logs_routing.h"
 #include "otel_logs_shard_hash.h"
@@ -22,6 +23,12 @@
 #include <util/generic/hash.h>
 #include <util/generic/hash_set.h>
 #include <util/generic/vector.h>
+#include <library/cpp/json/json_writer.h>
+#include <library/cpp/json/writer/json_value.h>
+#include <library/cpp/string_utils/base64/base64.h>
+
+#include <util/stream/str.h>
+
 #include <util/string/cast.h>
 #include <util/string/hex.h>
 
@@ -155,9 +162,427 @@ bool WireReadBytes(CIS* input, TString* out) {
     return WFL::ReadString(input, out);
 }
 
-bool WireParseAnyValueString(CIS* input, ui32 len, TString* out) {
+bool WireParseAnyValueJson(CIS* input, ui32 len, NJson::TJsonValue* out);
+bool WireParseKeyValueToJson(CIS* input, ui32 len, TString* key, NJson::TJsonValue* val);
+
+bool WireParseKeyValueList(CIS* input, ui32 len, NJson::TJsonValue* out) {
+    out->SetType(NJson::JSON_MAP);
     const auto limit = input->PushLimit(static_cast<int>(len));
-    bool got = false;
+    while (input->BytesUntilLimit() > 0) {
+        const ui32 tag = input->ReadTag();
+        if (tag == 0) {
+            break;
+        }
+        if (static_cast<int>(WFL::GetTagFieldNumber(tag)) != commonpb::KeyValueList::kValuesFieldNumber) {
+            if (!WFL::SkipField(input, tag)) {
+                input->PopLimit(limit);
+                return false;
+            }
+            continue;
+        }
+        ui32 kvLen = 0;
+        if (!input->ReadVarint32(&kvLen)) {
+            input->PopLimit(limit);
+            return false;
+        }
+        TString k;
+        NJson::TJsonValue vjv;
+        if (!WireParseKeyValueToJson(input, kvLen, &k, &vjv)) {
+            input->PopLimit(limit);
+            return false;
+        }
+        if (!k.empty()) {
+            out->InsertValue(std::move(k), std::move(vjv));
+        }
+    }
+    input->PopLimit(limit);
+    return true;
+}
+
+bool WireParseArrayValue(CIS* input, ui32 len, NJson::TJsonValue* out) {
+    out->SetType(NJson::JSON_ARRAY);
+    const auto limit = input->PushLimit(static_cast<int>(len));
+    while (input->BytesUntilLimit() > 0) {
+        const ui32 tag = input->ReadTag();
+        if (tag == 0) {
+            break;
+        }
+        if (static_cast<int>(WFL::GetTagFieldNumber(tag)) != commonpb::ArrayValue::kValuesFieldNumber) {
+            if (!WFL::SkipField(input, tag)) {
+                input->PopLimit(limit);
+                return false;
+            }
+            continue;
+        }
+        ui32 elLen = 0;
+        if (!input->ReadVarint32(&elLen)) {
+            input->PopLimit(limit);
+            return false;
+        }
+        NJson::TJsonValue el;
+        if (!WireParseAnyValueJson(input, elLen, &el)) {
+            input->PopLimit(limit);
+            return false;
+        }
+        out->AppendValue(std::move(el));
+    }
+    input->PopLimit(limit);
+    return true;
+}
+
+bool WireParseAnyValueJson(CIS* input, ui32 len, NJson::TJsonValue* out) {
+    const auto limit = input->PushLimit(static_cast<int>(len));
+    *out = NJson::TJsonValue{};
+    while (input->BytesUntilLimit() > 0) {
+        const ui32 tag = input->ReadTag();
+        if (tag == 0) {
+            break;
+        }
+        switch (WFL::GetTagFieldNumber(tag)) {
+            case commonpb::AnyValue::kStringValueFieldNumber:
+                if (WFL::GetTagWireType(tag) != WFL::WIRETYPE_LENGTH_DELIMITED) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                {
+                    TString s;
+                    if (!WireReadUtf8String(input, &s)) {
+                        input->PopLimit(limit);
+                        return false;
+                    }
+                    *out = std::move(s);
+                }
+                break;
+            case commonpb::AnyValue::kBoolValueFieldNumber: {
+                ui64 v = 0;
+                if (!input->ReadVarint64(&v)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                *out = static_cast<bool>(v);
+                break;
+            }
+            case commonpb::AnyValue::kIntValueFieldNumber: {
+                ui64 v = 0;
+                if (!input->ReadVarint64(&v)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                *out = static_cast<i64>(v);
+                break;
+            }
+            case commonpb::AnyValue::kDoubleValueFieldNumber: {
+                double v = 0.0;
+                if (!WFL::ReadPrimitive<double, WFL::TYPE_DOUBLE>(input, &v)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                *out = v;
+                break;
+            }
+            case commonpb::AnyValue::kBytesValueFieldNumber:
+                if (WFL::GetTagWireType(tag) != WFL::WIRETYPE_LENGTH_DELIMITED) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                {
+                    TString bytes;
+                    if (!WireReadBytes(input, &bytes)) {
+                        input->PopLimit(limit);
+                        return false;
+                    }
+                    *out = Base64Encode(TStringBuf{bytes});
+                }
+                break;
+            case commonpb::AnyValue::kKvlistValueFieldNumber: {
+                ui32 subLen = 0;
+                if (!input->ReadVarint32(&subLen)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                if (!WireParseKeyValueList(input, subLen, out)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                break;
+            }
+            case commonpb::AnyValue::kArrayValueFieldNumber: {
+                ui32 subLen = 0;
+                if (!input->ReadVarint32(&subLen)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                if (!WireParseArrayValue(input, subLen, out)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                break;
+            }
+            default:
+                if (!WFL::SkipField(input, tag)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                break;
+        }
+    }
+    input->PopLimit(limit);
+    return true;
+}
+
+bool WireParseKeyValueToJson(CIS* input, ui32 len, TString* key, NJson::TJsonValue* val) {
+    const auto limit = input->PushLimit(static_cast<int>(len));
+    key->clear();
+    *val = NJson::TJsonValue{};
+    while (input->BytesUntilLimit() > 0) {
+        const ui32 tag = input->ReadTag();
+        if (tag == 0) {
+            break;
+        }
+        switch (WFL::GetTagFieldNumber(tag)) {
+            case commonpb::KeyValue::kKeyFieldNumber:
+                if (!WireReadUtf8String(input, key)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                break;
+            case commonpb::KeyValue::kValueFieldNumber: {
+                ui32 vlen = 0;
+                if (!input->ReadVarint32(&vlen)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                if (!WireParseAnyValueJson(input, vlen, val)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                break;
+            }
+            default:
+                if (!WFL::SkipField(input, tag)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                break;
+        }
+    }
+    input->PopLimit(limit);
+    return true;
+}
+
+bool WireParseAnyValueToJsonWriter(CIS* input, ui32 len, NJsonWriter::TBuf* w);
+bool WireParseKeyValueListToWriter(CIS* input, ui32 len, NJsonWriter::TBuf* w);
+bool WireParseArrayValueToWriter(CIS* input, ui32 len, NJsonWriter::TBuf* w);
+
+bool WireParseKeyValueListToWriter(CIS* input, ui32 len, NJsonWriter::TBuf* w) {
+    auto obj = w->BeginObject();
+    const auto limit = input->PushLimit(static_cast<int>(len));
+    while (input->BytesUntilLimit() > 0) {
+        const ui32 tag = input->ReadTag();
+        if (tag == 0) {
+            break;
+        }
+        if (static_cast<int>(WFL::GetTagFieldNumber(tag)) != commonpb::KeyValueList::kValuesFieldNumber) {
+            if (!WFL::SkipField(input, tag)) {
+                input->PopLimit(limit);
+                return false;
+            }
+            continue;
+        }
+        ui32 kvLen = 0;
+        if (!input->ReadVarint32(&kvLen)) {
+            input->PopLimit(limit);
+            return false;
+        }
+        TString key;
+        ui32 vlen = 0;
+        const auto kvLimit = input->PushLimit(static_cast<int>(kvLen));
+        while (input->BytesUntilLimit() > 0) {
+            const ui32 kvTag = input->ReadTag();
+            if (kvTag == 0) {
+                break;
+            }
+            switch (WFL::GetTagFieldNumber(kvTag)) {
+                case commonpb::KeyValue::kKeyFieldNumber:
+                    if (!WireReadUtf8String(input, &key)) {
+                        input->PopLimit(kvLimit);
+                        input->PopLimit(limit);
+                        return false;
+                    }
+                    break;
+                case commonpb::KeyValue::kValueFieldNumber:
+                    if (!input->ReadVarint32(&vlen)) {
+                        input->PopLimit(kvLimit);
+                        input->PopLimit(limit);
+                        return false;
+                    }
+                    break;
+                default:
+                    if (!WFL::SkipField(input, kvTag)) {
+                        input->PopLimit(kvLimit);
+                        input->PopLimit(limit);
+                        return false;
+                    }
+                    break;
+            }
+        }
+        input->PopLimit(kvLimit);
+        if (!key.empty() && vlen > 0) {
+            obj.WriteKey(key);
+            if (!WireParseAnyValueToJsonWriter(input, vlen, w)) {
+                input->PopLimit(limit);
+                return false;
+            }
+        }
+    }
+    input->PopLimit(limit);
+    w->EndObject();
+    Y_UNUSED(obj);
+    return true;
+}
+
+bool WireParseArrayValueToWriter(CIS* input, ui32 len, NJsonWriter::TBuf* w) {
+    auto list = w->BeginList();
+    const auto limit = input->PushLimit(static_cast<int>(len));
+    while (input->BytesUntilLimit() > 0) {
+        const ui32 tag = input->ReadTag();
+        if (tag == 0) {
+            break;
+        }
+        if (static_cast<int>(WFL::GetTagFieldNumber(tag)) != commonpb::ArrayValue::kValuesFieldNumber) {
+            if (!WFL::SkipField(input, tag)) {
+                input->PopLimit(limit);
+                return false;
+            }
+            continue;
+        }
+        ui32 elLen = 0;
+        if (!input->ReadVarint32(&elLen)) {
+            input->PopLimit(limit);
+            return false;
+        }
+        if (!WireParseAnyValueToJsonWriter(input, elLen, w)) {
+            input->PopLimit(limit);
+            return false;
+        }
+    }
+    input->PopLimit(limit);
+    w->EndList();
+    Y_UNUSED(list);
+    return true;
+}
+
+bool WireParseAnyValueToJsonWriter(CIS* input, ui32 len, NJsonWriter::TBuf* w) {
+    const auto limit = input->PushLimit(static_cast<int>(len));
+    while (input->BytesUntilLimit() > 0) {
+        const ui32 tag = input->ReadTag();
+        if (tag == 0) {
+            break;
+        }
+        switch (WFL::GetTagFieldNumber(tag)) {
+            case commonpb::AnyValue::kStringValueFieldNumber:
+                if (WFL::GetTagWireType(tag) != WFL::WIRETYPE_LENGTH_DELIMITED) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                {
+                    TString s;
+                    if (!WireReadUtf8String(input, &s)) {
+                        input->PopLimit(limit);
+                        return false;
+                    }
+                    w->WriteString(s);
+                }
+                break;
+            case commonpb::AnyValue::kBoolValueFieldNumber: {
+                ui64 v = 0;
+                if (!input->ReadVarint64(&v)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                w->WriteBool(static_cast<bool>(v));
+                break;
+            }
+            case commonpb::AnyValue::kIntValueFieldNumber: {
+                ui64 v = 0;
+                if (!input->ReadVarint64(&v)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                w->WriteLongLong(static_cast<i64>(v));
+                break;
+            }
+            case commonpb::AnyValue::kDoubleValueFieldNumber: {
+                double v = 0.0;
+                if (!WFL::ReadPrimitive<double, WFL::TYPE_DOUBLE>(input, &v)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                w->WriteDouble(v);
+                break;
+            }
+            case commonpb::AnyValue::kBytesValueFieldNumber:
+                if (WFL::GetTagWireType(tag) != WFL::WIRETYPE_LENGTH_DELIMITED) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                {
+                    TString bytes;
+                    if (!WireReadBytes(input, &bytes)) {
+                        input->PopLimit(limit);
+                        return false;
+                    }
+                    w->WriteString(TStringBuf{Base64Encode(TStringBuf{bytes})});
+                }
+                break;
+            case commonpb::AnyValue::kKvlistValueFieldNumber: {
+                ui32 subLen = 0;
+                if (!input->ReadVarint32(&subLen)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                if (!WireParseKeyValueListToWriter(input, subLen, w)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                break;
+            }
+            case commonpb::AnyValue::kArrayValueFieldNumber: {
+                ui32 subLen = 0;
+                if (!input->ReadVarint32(&subLen)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                if (!WireParseArrayValueToWriter(input, subLen, w)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                break;
+            }
+            default:
+                if (!WFL::SkipField(input, tag)) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                break;
+        }
+    }
+    input->PopLimit(limit);
+    return true;
+}
+
+bool WireParseAnyValueString(CIS* input, ui32 len, TString* out, bool streamingJson) {
+    if (!streamingJson) {
+        NJson::TJsonValue jv;
+        if (!WireParseAnyValueJson(input, len, &jv)) {
+            return false;
+        }
+        JsonValueToOtelAsString(jv, out);
+        return true;
+    }
+
+    const auto limit = input->PushLimit(static_cast<int>(len));
+    out->clear();
     while (input->BytesUntilLimit() > 0) {
         const ui32 tag = input->ReadTag();
         if (tag == 0) {
@@ -173,7 +598,6 @@ bool WireParseAnyValueString(CIS* input, ui32 len, TString* out) {
                     input->PopLimit(limit);
                     return false;
                 }
-                got = true;
                 break;
             case commonpb::AnyValue::kBoolValueFieldNumber: {
                 ui64 v = 0;
@@ -182,7 +606,6 @@ bool WireParseAnyValueString(CIS* input, ui32 len, TString* out) {
                     return false;
                 }
                 *out = v ? TString{"true"} : TString{"false"};
-                got = true;
                 break;
             }
             case commonpb::AnyValue::kIntValueFieldNumber: {
@@ -192,7 +615,6 @@ bool WireParseAnyValueString(CIS* input, ui32 len, TString* out) {
                     return false;
                 }
                 *out = ToString(static_cast<i64>(v));
-                got = true;
                 break;
             }
             case commonpb::AnyValue::kDoubleValueFieldNumber: {
@@ -202,7 +624,6 @@ bool WireParseAnyValueString(CIS* input, ui32 len, TString* out) {
                     return false;
                 }
                 *out = ToString(v);
-                got = true;
                 break;
             }
             case commonpb::AnyValue::kBytesValueFieldNumber:
@@ -210,12 +631,34 @@ bool WireParseAnyValueString(CIS* input, ui32 len, TString* out) {
                     input->PopLimit(limit);
                     return false;
                 }
-                if (!WireReadBytes(input, out)) {
+                {
+                    TString bytes;
+                    if (!WireReadBytes(input, &bytes)) {
+                        input->PopLimit(limit);
+                        return false;
+                    }
+                    *out = Base64Encode(TStringBuf{bytes});
+                }
+                break;
+            case commonpb::AnyValue::kKvlistValueFieldNumber:
+            case commonpb::AnyValue::kArrayValueFieldNumber: {
+                ui32 subLen = 0;
+                if (!input->ReadVarint32(&subLen)) {
                     input->PopLimit(limit);
                     return false;
                 }
-                got = true;
+                TStringStream ss;
+                NJsonWriter::TBuf buf(NJsonWriter::HEM_DONT_ESCAPE_HTML, &ss);
+                const bool ok = WFL::GetTagFieldNumber(tag) == commonpb::AnyValue::kKvlistValueFieldNumber
+                    ? WireParseKeyValueListToWriter(input, subLen, &buf)
+                    : WireParseArrayValueToWriter(input, subLen, &buf);
+                if (!ok) {
+                    input->PopLimit(limit);
+                    return false;
+                }
+                *out = std::move(ss.Str());
                 break;
+            }
             default:
                 if (!WFL::SkipField(input, tag)) {
                     input->PopLimit(limit);
@@ -225,9 +668,6 @@ bool WireParseAnyValueString(CIS* input, ui32 len, TString* out) {
         }
     }
     input->PopLimit(limit);
-    if (!got) {
-        *out = TString{"<non_scalar>"};
-    }
     return true;
 }
 
@@ -252,7 +692,7 @@ void WireClassifyLogAttribute(
     }
 }
 
-bool WireParseKeyValue(CIS* input, ui32 len, TString* key, TString* val) {
+bool WireParseKeyValue(CIS* input, ui32 len, TString* key, TString* val, bool streamingJson) {
     const auto limit = input->PushLimit(static_cast<int>(len));
     while (input->BytesUntilLimit() > 0) {
         const ui32 tag = input->ReadTag();
@@ -272,7 +712,7 @@ bool WireParseKeyValue(CIS* input, ui32 len, TString* key, TString* val) {
                     input->PopLimit(limit);
                     return false;
                 }
-                if (!WireParseAnyValueString(input, vlen, val)) {
+                if (!WireParseAnyValueString(input, vlen, val, streamingJson)) {
                     input->PopLimit(limit);
                     return false;
                 }
@@ -301,7 +741,8 @@ bool WireParseAttributes(
     CIS* input,
     ui32 len,
     int repeatedKvFieldNumber,
-    THashMap<TString, TString>* out)
+    THashMap<TString, TString>* out,
+    bool streamingJson)
 {
     const auto limit = input->PushLimit(static_cast<int>(len));
     while (input->BytesUntilLimit() > 0) {
@@ -323,7 +764,7 @@ bool WireParseAttributes(
         }
         TString key;
         TString val;
-        if (!WireParseKeyValue(input, kvLen, &key, &val)) {
+        if (!WireParseKeyValue(input, kvLen, &key, &val, streamingJson)) {
             input->PopLimit(limit);
             return false;
         }
@@ -341,7 +782,8 @@ bool WireParseLogRecord(
     const TResourceWireCtx& res,
     TOwnedLogRow* row,
     THashMap<TString, TString>* logLabels,
-    THashMap<TString, TString>* logMeta)
+    THashMap<TString, TString>* logMeta,
+    bool streamingJson)
 {
     const auto limit = input->PushLimit(static_cast<int>(len));
     ui64 timeNs = 0;
@@ -384,7 +826,7 @@ bool WireParseLogRecord(
                     input->PopLimit(limit);
                     return false;
                 }
-                if (!WireParseAnyValueString(input, blen, &body)) {
+                if (!WireParseAnyValueString(input, blen, &body, streamingJson)) {
                     input->PopLimit(limit);
                     return false;
                 }
@@ -399,7 +841,7 @@ bool WireParseLogRecord(
                 }
                 TString key;
                 TString val;
-                if (!WireParseKeyValue(input, kvLen, &key, &val)) {
+                if (!WireParseKeyValue(input, kvLen, &key, &val, streamingJson)) {
                     input->PopLimit(limit);
                     return false;
                 }
@@ -488,7 +930,8 @@ bool WireParseScopeLogs(
         TOwnedLogRow row;
         THashMap<TString, TString> logLabels;
         THashMap<TString, TString> logMeta;
-        if (!WireParseLogRecord(input, recLen, res, &row, &logLabels, &logMeta)) {
+        if (!WireParseLogRecord(
+                input, recLen, res, &row, &logLabels, &logMeta, cfg.IngestStreamingJsonSerializer)) {
             input->PopLimit(limit);
             return false;
         }
@@ -615,7 +1058,9 @@ bool WireParseResourceLogs(
                 return false;
             }
             THashMap<TString, TString> resourceAttrs;
-            if (!WireParseAttributes(&sub, rlen, respb::Resource::kAttributesFieldNumber, &resourceAttrs)) {
+            if (!WireParseAttributes(
+                    &sub, rlen, respb::Resource::kAttributesFieldNumber, &resourceAttrs,
+                    cfg.IngestStreamingJsonSerializer)) {
                 return false;
             }
             BuildResourceWireCtx(std::move(resourceAttrs), &res);

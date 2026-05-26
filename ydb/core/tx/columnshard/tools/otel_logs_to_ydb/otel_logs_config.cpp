@@ -147,6 +147,8 @@ bool LoadOtelLogsYaml(const TString& path, TServerConfig* cfg, TString* errorMsg
             minFlushBytes = NodeAsInt64(n["shard_buffer_max_bytes"], 0);
         }
         cfg->ShardBufferFlushIntervalSec = static_cast<ui64>(Max<i64>(0, NodeAsInt64(n["shard_buffer_flush_interval_sec"], static_cast<i64>(cfg->ShardBufferFlushIntervalSec))));
+        cfg->ShardBufferFlushIntervalJitterSec = static_cast<ui64>(Max<i64>(
+            0, NodeAsInt64(n["shard_buffer_flush_interval_jitter_sec"], static_cast<i64>(cfg->ShardBufferFlushIntervalJitterSec))));
         if (minFlushRec > 0 && minFlushBytes > 0) {
             if (errorMsg) {
                 *errorMsg = TString{"only one of shard_buffer_min_flush_records or shard_buffer_min_flush_bytes may be non-zero"};
@@ -161,10 +163,23 @@ bool LoadOtelLogsYaml(const TString& path, TServerConfig* cfg, TString* errorMsg
         }
         cfg->ShardBufferMinFlushRecords = minFlushRec;
         cfg->ShardBufferMinFlushBytes = minFlushBytes;
+        {
+            const i64 overshootPct = NodeAsInt64(
+                n["shard_buffer_flush_max_overshoot_percent"],
+                static_cast<i64>(cfg->ShardBufferFlushMaxOvershootPercent));
+            if (overshootPct < 0 || overshootPct > 1000) {
+                if (errorMsg) {
+                    *errorMsg = TString{"shard_buffer_flush_max_overshoot_percent must be in [0, 1000]"};
+                }
+                return false;
+            }
+            cfg->ShardBufferFlushMaxOvershootPercent = static_cast<ui32>(overshootPct);
+        }
         cfg->SupplierPoolSize = NodeAsInt(n["supplier_pool_size"], cfg->SupplierPoolSize);
         cfg->YdbMaxConcurrentBulkUpserts = NodeAsInt(n["ydb_max_concurrent_bulk"], cfg->YdbMaxConcurrentBulkUpserts);
         cfg->YdbFlushWorkers = static_cast<size_t>(Max<i64>(0, NodeAsInt64(n["ydb_flush_workers"], static_cast<i64>(cfg->YdbFlushWorkers))));
         cfg->FlushQueueMax = static_cast<size_t>(Max<i64>(1, NodeAsInt64(n["flush_queue_max"], static_cast<i64>(cfg->FlushQueueMax))));
+        cfg->FlushQueueDropOnFull = NodeAsBool(n["flush_queue_drop_on_full"], cfg->FlushQueueDropOnFull);
         cfg->PartitionCountCommon = NodeAsInt(n["auto_create_partition_count_common"], cfg->PartitionCountCommon);
         cfg->PartitionCountDedicated = NodeAsInt(n["auto_create_partition_count_dedicated"], cfg->PartitionCountDedicated);
         cfg->AutoCreateMissingTables = NodeAsBool(n["auto_create_missing_tables"], cfg->AutoCreateMissingTables);
@@ -174,6 +189,28 @@ bool LoadOtelLogsYaml(const TString& path, TServerConfig* cfg, TString* errorMsg
         cfg->ValidationEnabled = NodeAsBool(n["validation_enabled"], cfg->ValidationEnabled);
         cfg->ExportRoutableWirePrecheck = NodeAsBool(n["export_routable_wire_precheck"], cfg->ExportRoutableWirePrecheck);
         cfg->IngestWireToOwned = NodeAsBool(n["ingest_wire_to_owned"], cfg->IngestWireToOwned);
+        cfg->IngestStreamingJsonSerializer = NodeAsBool(
+            n["ingest_streaming_json_serializer"], cfg->IngestStreamingJsonSerializer);
+        cfg->CaptureExportRequestsMax = static_cast<size_t>(
+            Max<i64>(0, NodeAsInt64(n["capture_export_requests_max"], static_cast<i64>(cfg->CaptureExportRequestsMax))));
+        {
+            const TString capDir = NodeAsString(n["capture_export_requests_dir"], TString{cfg->CaptureExportRequestsDir.data(), cfg->CaptureExportRequestsDir.size()});
+            cfg->CaptureExportRequestsDir.assign(capDir.data(), capDir.size());
+        }
+        cfg->IngestShardLockTimeoutMs = static_cast<ui32>(
+            Max<i64>(0, NodeAsInt64(n["ingest_shard_lock_timeout_ms"], cfg->IngestShardLockTimeoutMs)));
+        cfg->IngestShardLockMaxSpins = static_cast<int>(
+            Max<i64>(1, NodeAsInt64(n["ingest_shard_lock_max_spins"], cfg->IngestShardLockMaxSpins)));
+        cfg->IngestShardLockRetryMs = static_cast<ui32>(
+            Max<i64>(1, NodeAsInt64(n["ingest_shard_lock_retry_ms"], cfg->IngestShardLockRetryMs)));
+        cfg->FlushEnqueueTimeoutMs = static_cast<ui32>(
+            Max<i64>(0, NodeAsInt64(n["flush_enqueue_timeout_ms"], cfg->FlushEnqueueTimeoutMs)));
+        cfg->IngestStallWatchdogSec = static_cast<ui32>(
+            Max<i64>(0, NodeAsInt64(n["ingest_stall_watchdog_sec"], cfg->IngestStallWatchdogSec)));
+        cfg->IngestStallWatchdogPollSec = static_cast<ui32>(
+            Max<i64>(1, NodeAsInt64(n["ingest_stall_watchdog_poll_sec"], cfg->IngestStallWatchdogPollSec)));
+        cfg->IngestWireParseMaxBytes = static_cast<ui64>(
+            Max<i64>(0, NodeAsInt64(n["ingest_wire_parse_max_bytes"], static_cast<i64>(cfg->IngestWireParseMaxBytes))));
 
         const YAML::Node ap = n["allowed_projects"];
         if (ap && ap.IsSequence()) {

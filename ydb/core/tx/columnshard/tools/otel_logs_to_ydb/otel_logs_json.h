@@ -4,7 +4,7 @@
 #include <util/generic/string.h>
 namespace NColumnShard::NOtelLogsToYdb {
 
-/// Same as proto path: `THashMap` → `NJson::TJsonValue` map → `NJson::WriteJson`.
+/// Flat `THashMap` → JSON object (`{"k":"v",...}`) via `NJsonWriter::TBuf` (no `TJsonValue`).
 TString JsonStringifyMap(const THashMap<TString, TString>& m);
 
 /// `dst` keeps existing keys; fills only keys missing in `dst` (proto labels/meta merge).

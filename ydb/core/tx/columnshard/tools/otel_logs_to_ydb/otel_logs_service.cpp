@@ -8,6 +8,8 @@
 #include "otel_logs_shard_hash.h"
 #include "otel_logs_validator.h"
 #include "otel_logs_buck.h"
+#include "otel_logs_capture.h"
+#include "otel_logs_anyvalue.h"
 #include "otel_logs_json.h"
 #include "otel_logs_wire_ingest.h"
 #include "otel_logs_wire_routable.h"
@@ -20,6 +22,7 @@
 #include <arrow/io/memory.h>
 #include <arrow/ipc/writer.h>
 #include <arrow/record_batch.h>
+#include <arrow/util/compression.h>
 
 #include <library/cpp/http/misc/parsed_request.h>
 #include <library/cpp/http/server/http.h>
@@ -121,78 +124,6 @@ TString Utf8Safe(TString raw) {
     return WideToUTF8(TWtringBuf(wide));
 }
 
-void AnyValueToString(const AnyValue& v, TString* out) {
-    switch (v.value_case()) {
-        case AnyValue::kStringValue:
-            *out = TString{v.string_value()};
-            return;
-        case AnyValue::kBoolValue:
-            *out = v.bool_value() ? TString{"true"} : TString{"false"};
-            return;
-        case AnyValue::kIntValue:
-            *out = ToString(v.int_value());
-            return;
-        case AnyValue::kDoubleValue:
-            *out = ToString(v.double_value());
-            return;
-        case AnyValue::kBytesValue:
-            *out = TString{v.bytes_value()};
-            return;
-        default:
-            *out = TString{"<non_scalar>"};
-            return;
-    }
-}
-
-void AnyValueToJsonValue(const AnyValue& v, NJson::TJsonValue* jv);
-
-void KeyValueListToJson(const KeyValueList& list, NJson::TJsonValue* jv) {
-    jv->SetType(NJson::JSON_MAP);
-    for (const KeyValue& kv : list.values()) {
-        NJson::TJsonValue val;
-        AnyValueToJsonValue(kv.value(), &val);
-        jv->InsertValue(TString{kv.key()}, std::move(val));
-    }
-}
-
-void ArrayValueToJson(const ArrayValue& arr, NJson::TJsonValue* jv) {
-    jv->SetType(NJson::JSON_ARRAY);
-    for (const AnyValue& el : arr.values()) {
-        NJson::TJsonValue item;
-        AnyValueToJsonValue(el, &item);
-        jv->AppendValue(std::move(item));
-    }
-}
-
-void AnyValueToJsonValue(const AnyValue& v, NJson::TJsonValue* jv) {
-    switch (v.value_case()) {
-        case AnyValue::kStringValue:
-            *jv = TString{v.string_value()};
-            break;
-        case AnyValue::kBoolValue:
-            *jv = v.bool_value();
-            break;
-        case AnyValue::kIntValue:
-            *jv = v.int_value();
-            break;
-        case AnyValue::kDoubleValue:
-            *jv = v.double_value();
-            break;
-        case AnyValue::kBytesValue:
-            *jv = TString{v.bytes_value()};
-            break;
-        case AnyValue::kArrayValue:
-            ArrayValueToJson(v.array_value(), jv);
-            break;
-        case AnyValue::kKvlistValue:
-            KeyValueListToJson(v.kvlist_value(), jv);
-            break;
-        default:
-            *jv = TString{};
-            break;
-    }
-}
-
 TString BodyToMessageUtf8(const AnyValue& body) {
     TString raw;
     switch (body.value_case()) {
@@ -211,11 +142,12 @@ TString BodyToMessageUtf8(const AnyValue& body) {
 
 void ParseAttributes(
     const google::protobuf::RepeatedPtrField<KeyValue>& kvs,
-    THashMap<TString, TString>* out)
+    THashMap<TString, TString>* out,
+    bool streamingJson)
 {
     for (const KeyValue& kv : kvs) {
         TString val;
-        AnyValueToString(kv.value(), &val);
+        AnyValueToOtelAsString(kv.value(), &val, streamingJson);
         val = Utf8Safe(std::move(val));
         if (!val.empty()) {
             (*out)[Utf8Safe(TStringBuf(kv.key()))] = val;
@@ -238,7 +170,7 @@ struct TResourceRowCtx {
 
 TProjectService ExtractProjectService(const Resource& resource) {
     THashMap<TString, TString> m;
-    ParseAttributes(resource.attributes(), &m);
+    ParseAttributes(resource.attributes(), &m, /*streamingJson*/ false);
     TProjectService ps;
     if (auto it = m.find(TString{AttrProject}); it != m.end()) {
         ps.Project = it->second;
@@ -262,12 +194,13 @@ void SplitResourceAttributes(
     const Resource& resource,
     TString* cluster,
     THashMap<TString, TString>* resourceLabels,
-    THashMap<TString, TString>* resourceMeta)
+    THashMap<TString, TString>* resourceMeta,
+    bool streamingJson)
 {
     for (const KeyValue& kv : resource.attributes()) {
         TString key = Utf8Safe(TStringBuf(kv.key()));
         TString val;
-        AnyValueToString(kv.value(), &val);
+        AnyValueToOtelAsString(kv.value(), &val, streamingJson);
         val = Utf8Safe(std::move(val));
         if (val.empty()) {
             continue;
@@ -288,12 +221,13 @@ void SplitLogAttributes(
     const google::protobuf::RepeatedPtrField<KeyValue>& kvs,
     TString* recordId,
     THashMap<TString, TString>* logLabels,
-    THashMap<TString, TString>* logMeta)
+    THashMap<TString, TString>* logMeta,
+    bool streamingJson)
 {
     for (const KeyValue& kv : kvs) {
         TString key = Utf8Safe(TStringBuf(kv.key()));
         TString val;
-        AnyValueToString(kv.value(), &val);
+        AnyValueToOtelAsString(kv.value(), &val, streamingJson);
         val = Utf8Safe(std::move(val));
         if (val.empty()) {
             continue;
@@ -310,11 +244,11 @@ void SplitLogAttributes(
     }
 }
 
-static TResourceRowCtx BuildResourceRowCtx(const Resource& resource, const TProjectService& ps) {
+static TResourceRowCtx BuildResourceRowCtx(const Resource& resource, const TProjectService& ps, bool streamingJson) {
     TResourceRowCtx ctx;
     ctx.Service = ps.Service.empty() ? TString{"_unknown"} : ps.Service;
     ctx.Service = Utf8Safe(std::move(ctx.Service));
-    SplitResourceAttributes(resource, &ctx.Cluster, &ctx.ResourceLabels, &ctx.ResourceMeta);
+    SplitResourceAttributes(resource, &ctx.Cluster, &ctx.ResourceLabels, &ctx.ResourceMeta, streamingJson);
     return ctx;
 }
 
@@ -479,7 +413,7 @@ bool ExportHasRoutableLogRows(const TServerConfig& cfg, const ologs::ExportLogsS
         TString cluster;
         THashMap<TString, TString> rlab;
         THashMap<TString, TString> rmeta;
-        SplitResourceAttributes(rl.resource(), &cluster, &rlab, &rmeta);
+        SplitResourceAttributes(rl.resource(), &cluster, &rlab, &rmeta, /*streamingJson*/ false);
         const TRoutedTable route = ResolveLogsTable(cfg, ps.Project, ps.Service, cluster, perProject);
         if (route.Drop) {
             continue;
@@ -689,11 +623,11 @@ static ui64 OwnedRowApproxBytes(const TOwnedLogRow& r) noexcept {
         + r.MetaJson.size() + 64);
 }
 
-static TOwnedLogRow MakeOwnedLogRow(const TResourceRowCtx& res, const LogRecord& lr) {
+static TOwnedLogRow MakeOwnedLogRow(const TResourceRowCtx& res, const LogRecord& lr, bool streamingJson) {
     TString recordId;
     THashMap<TString, TString> logLabels;
     THashMap<TString, TString> logMeta;
-    SplitLogAttributes(lr.attributes(), &recordId, &logLabels, &logMeta);
+    SplitLogAttributes(lr.attributes(), &recordId, &logLabels, &logMeta, streamingJson);
     if (recordId.empty()) {
         recordId = CreateGuidAsString();
     }
@@ -742,6 +676,12 @@ static void YdbArrowSerializeBulkPayload(const std::shared_ptr<arrow::RecordBatc
     }
     arrow::ipc::IpcWriteOptions opts = arrow::ipc::IpcWriteOptions::Defaults();
     opts.use_threads = false;
+    // IPC: only LZ4_FRAME and ZSTD (arrow/ipc/options.cc CheckCompressionSupported).
+    {
+        auto codecRes = arrow::util::Codec::Create(arrow::Compression::LZ4_FRAME);
+        ArrowCheckStatus(codecRes.status(), "Codec::Create(LZ4_FRAME)");
+        opts.codec = std::shared_ptr<arrow::util::Codec>(codecRes.MoveValueUnsafe());
+    }
     arrow::ipc::IpcPayload payload;
     ArrowCheckStatus(arrow::ipc::GetRecordBatchPayload(*batch, opts, &payload), "GetRecordBatchPayload");
     int32_t metadata_length = 0;
@@ -927,13 +867,29 @@ static void SerializeLogsBulkArrow(
 
 } // namespace
 
+/// Per-bucket time flush interval: `baseSec` ± `jitterSec` (stable hash spread; 0 jitter → exactly `baseSec`).
+static ui64 EffectiveShardFlushIntervalSec(ui64 baseSec, ui64 jitterSec, const TBuck& buck) {
+    if (baseSec == 0) {
+        return 0;
+    }
+    if (jitterSec == 0) {
+        return baseSec;
+    }
+    const ui64 span = 2 * jitterSec + 1;
+    const i64 delta = static_cast<i64>(TBuckHash{}(buck) % span) - static_cast<i64>(jitterSec);
+    const i64 effective = static_cast<i64>(baseSec) + delta;
+    return static_cast<ui64>(Max<i64>(1, effective));
+}
+
 struct TShardBuffer {
-    explicit TShardBuffer(TBuck buck)
+    TShardBuffer(TBuck buck, ui64 flushIntervalSec, ui64 flushIntervalJitterSec)
         : Buck(std::move(buck))
+        , FlushIntervalSec(EffectiveShardFlushIntervalSec(flushIntervalSec, flushIntervalJitterSec, Buck))
     {
     }
 
     const TBuck Buck;
+    const ui64 FlushIntervalSec = 0;
     std::mutex Mu;
     TVector<TOwnedLogRow> Rows;
     ui64 ApproxBytes = 0;
@@ -949,6 +905,50 @@ static ui64 SumOwnedRowsApproxBytes(const TVector<TOwnedLogRow>& rows) {
         sum += OwnedRowApproxBytes(r);
     }
     return sum;
+}
+
+/// Max bytes per flush chunk when `shard_buffer_min_flush_bytes` is set (min + overshoot%).
+static ui64 ShardBufferMaxFlushBytes(ui64 minFlushBytes, ui32 overshootPercent) {
+    return minFlushBytes + (minFlushBytes * static_cast<ui64>(overshootPercent) / 100);
+}
+
+/// FIFO: split `rows` into `out` (flush chunk) and `rest` (stays in shard buffer).
+/// Takes at least `minFlushBytes`, but not more than `maxFlushBytes` (may take one oversized row).
+static void SplitRowsForByteCappedFlush(
+    TVector<TOwnedLogRow>& rows,
+    ui64 minFlushBytes,
+    ui64 maxFlushBytes,
+    TVector<TOwnedLogRow>* out,
+    TVector<TOwnedLogRow>* rest)
+{
+    out->clear();
+    rest->clear();
+    if (rows.empty()) {
+        return;
+    }
+    ui64 sum = 0;
+    size_t take = 0;
+    const size_t n = rows.size();
+    for (size_t i = 0; i < n; ++i) {
+        const ui64 rowB = OwnedRowApproxBytes(rows[i]);
+        if (sum >= minFlushBytes && sum + rowB > maxFlushBytes) {
+            break;
+        }
+        sum += rowB;
+        ++take;
+    }
+    if (take == 0) {
+        take = 1;
+    }
+    out->reserve(take);
+    rest->reserve(n - take);
+    for (size_t i = 0; i < take; ++i) {
+        out->push_back(std::move(rows[i]));
+    }
+    for (size_t i = take; i < n; ++i) {
+        rest->push_back(std::move(rows[i]));
+    }
+    rows.clear();
 }
 
 static bool NeedsYdbWaitFlush(
@@ -968,6 +968,23 @@ static bool NeedsYdbWaitFlush(
     return pendingSince != TInstant::Zero() && (now - pendingSince) >= interval;
 }
 
+static void PrependRowsToShardBuffer(TShardBuffer* buf, TVector<TOwnedLogRow>&& rows) {
+    if (!buf || rows.empty()) {
+        return;
+    }
+    const ui64 addBytes = SumOwnedRowsApproxBytes(rows);
+    std::lock_guard<std::mutex> g(buf->Mu);
+    const bool wasEmpty = buf->Rows.empty();
+    buf->Rows.insert(
+        buf->Rows.begin(),
+        std::make_move_iterator(rows.begin()),
+        std::make_move_iterator(rows.end()));
+    buf->ApproxBytes += addBytes;
+    if (wasEmpty && !buf->Rows.empty()) {
+        buf->PendingSince = TInstant::Now();
+    }
+}
+
 struct TFlushWorkItem {
     TBuck Buck;
     TVector<TOwnedLogRow> Rows;
@@ -985,14 +1002,49 @@ public:
         }
     }
 
-    void PushBlocking(TFlushWorkItem item) {
+    bool TryPush(TFlushWorkItem* item) {
+        {
+            std::lock_guard<std::mutex> lk(Mu_);
+            if (Stopped_ || Q_.size() >= Cap_) {
+                return false;
+            }
+            Q_.push_back(std::move(*item));
+        }
+        PublishDepth();
+        CvPop_.notify_one();
+        return true;
+    }
+
+    bool TryPushWait(TFlushWorkItem* item, TDuration timeout) {
+        if (TryPush(item)) {
+            return true;
+        }
+        const auto deadline = std::chrono::steady_clock::now()
+            + std::chrono::milliseconds(timeout.MilliSeconds());
+        std::unique_lock<std::mutex> lk(Mu_);
+        while (!CvPush_.wait_until(lk, deadline, [&] { return Stopped_ || Q_.size() < Cap_; })) {
+            if (Stopped_) {
+                return false;
+            }
+        }
+        if (Stopped_ || Q_.size() >= Cap_) {
+            return false;
+        }
+        Q_.push_back(std::move(*item));
+        lk.unlock();
+        PublishDepth();
+        CvPop_.notify_one();
+        return true;
+    }
+
+    void PushBlocking(TFlushWorkItem* item) {
         {
             std::unique_lock<std::mutex> lk(Mu_);
             CvPush_.wait(lk, [&] { return Stopped_ || Q_.size() < Cap_; });
             if (Stopped_) {
                 return;
             }
-            Q_.push_back(std::move(item));
+            Q_.push_back(std::move(*item));
         }
         PublishDepth();
         CvPop_.notify_one();
@@ -1090,6 +1142,9 @@ struct TOtelLogsServer::TImpl {
     std::mutex PendingSweepMu_;
     std::thread Sweeper_;
     std::atomic<bool> StopSweeper{false};
+    std::thread Watchdog_;
+    std::atomic<bool> StopWatchdog{false};
+    std::unique_ptr<TExportRequestCapture> ExportCapture;
     TImpl(TServerConfig cfg, NYdb::TDriver& driver)
         : Cfg(std::move(cfg))
         , Driver(driver)
@@ -1100,6 +1155,13 @@ struct TOtelLogsServer::TImpl {
     {
         TableClient = std::make_unique<NYdb::NTable::TTableClient>(Driver);
         Ddl = std::make_unique<TDdlEnsurer>(Cfg);
+        if (Cfg.CaptureExportRequestsMax > 0) {
+            TString capDir{Cfg.CaptureExportRequestsDir.data(), Cfg.CaptureExportRequestsDir.size()};
+            if (capDir.empty()) {
+                capDir = "/tmp/otel_logs_export_capture";
+            }
+            ExportCapture = std::make_unique<TExportRequestCapture>(std::move(capDir), Cfg.CaptureExportRequestsMax);
+        }
     }
 
     static size_t ResolveYdbFlushWorkers(const TServerConfig& cfg) {
@@ -1110,12 +1172,16 @@ struct TOtelLogsServer::TImpl {
     }
 
     void ProcessExport(const ologs::ExportLogsServiceRequest& request);
-    void IngestWireBatch(grpc::ByteBuffer* buf, ui64 protoBytes);
+    void HandleIngestWire(TIngestWirePayload&& payload);
+    void HandleIngestProto(TIngestWirePayload& payload);
     void AppendOwnedShards(THashMap<TBuck, TVector<TOwnedLogRow>, TBuckHash>&& buckets);
+    /// Non-blocking: false when flush queue is full (rows stay in shard buffer).
+    bool EnqueueFlushWork(TFlushWorkItem* item);
+    void EnqueueFlushWorkBlocking(TFlushWorkItem* item);
+    void WatchdogLoop();
     void RegisterPendingSweep(TShardBuffer* buf);
     void UnregisterPendingSweep(TShardBuffer* buf);
     void TryFlushShardBuffer(TShardBuffer* buf);
-    void EnqueueFlushWork(TFlushWorkItem item);
     void BulkUpsertOwnedRows(const TBuck& buck, TVector<TOwnedLogRow>&& rows, TShardBuffer* bufForFlushOk = nullptr);
     void SweepShardBuffersIdle();
     void DrainAllShardBuffers();
@@ -1123,7 +1189,6 @@ struct TOtelLogsServer::TImpl {
     void YdbFlushWorkerLoop();
 
     void WorkerLoop() {
-        thread_local google::protobuf::Arena tlsParseArena;
         for (;;) {
             TIngestWirePayload payload;
             if (!Queue.WaitPop(&payload)) {
@@ -1132,26 +1197,19 @@ struct TOtelLogsServer::TImpl {
                 }
                 continue;
             }
-            const TIngestWorkerBusyGuard busy(Metrics.get());
-            const ui64 protoBytes = static_cast<ui64>(payload.Buf.Length());
-            if (Cfg.IngestWireToOwned) {
-                IngestWireBatch(&payload.Buf, protoBytes);
-                continue;
+            try {
+                if (Cfg.IngestWireToOwned) {
+                    HandleIngestWire(std::move(payload));
+                } else {
+                    HandleIngestProto(payload);
+                }
+            } catch (const std::exception& ex) {
+                Metrics->IncIngestWorkerExceptions();
+                std::cerr << "ingest worker exception: " << ex.what() << std::endl;
+            } catch (...) {
+                Metrics->IncIngestWorkerExceptions();
+                std::cerr << "ingest worker unknown exception" << std::endl;
             }
-            tlsParseArena.Reset();
-            const ologs::ExportLogsServiceRequest* req = ParseExportWire(&payload.Buf, &tlsParseArena);
-            if (!req) {
-                continue;
-            }
-            if (!RunOptionalLogValidation(Cfg.ValidationEnabled, *req)) {
-                continue;
-            }
-            if (!Cfg.ExportRoutableWirePrecheck && !ExportHasRoutableLogRows(Cfg, *req)) {
-                continue;
-            }
-            const size_t logRows = CountExportLogRecords(*req);
-            Metrics->AddPipelineIn(static_cast<ui64>(logRows), protoBytes);
-            ProcessExport(*req);
         }
     }
 
@@ -1176,6 +1234,10 @@ struct TOtelLogsServer::TImpl {
             FlushWorkers.emplace_back([this] { YdbFlushWorkerLoop(); });
         }
         Sweeper_ = std::thread([this] { SweeperLoop(); });
+        if (Cfg.IngestStallWatchdogSec > 0) {
+            StopWatchdog.store(false, std::memory_order_release);
+            Watchdog_ = std::thread([this] { WatchdogLoop(); });
+        }
 
         grpc::ServerBuilder builder;
         const TString listenAddr{TStringBuf(Cfg.ListenAddress.data(), Cfg.ListenAddress.size())};
@@ -1202,10 +1264,13 @@ struct TOtelLogsServer::TImpl {
         std::cerr << "otel_logs_to_ydb listening grpc://" << Cfg.ListenAddress << " ydb=" << Cfg.YdbEndpoint
                   << " db=" << Cfg.YdbDatabase << " prefix=" << Cfg.TablesPrefix << " layout=" << Cfg.TableLayout
                   << " ingest_queue=" << Cfg.IngestQueueMax << " workers=" << nWorkers << " flush_queue="
-                  << Cfg.FlushQueueMax << " ydb_flush_workers=" << nFlushWorkers << " ydb_max_concurrent_bulk="
+                  << Cfg.FlushQueueMax << " flush_queue_drop_on_full="
+                  << (Cfg.FlushQueueDropOnFull ? "true" : "false") << " ydb_flush_workers=" << nFlushWorkers
+                  << " ydb_max_concurrent_bulk="
                   << Cfg.YdbMaxConcurrentBulkUpserts << " export_routable_wire_precheck="
                   << (Cfg.ExportRoutableWirePrecheck ? "true" : "false") << " ingest_wire_to_owned="
-                  << (Cfg.IngestWireToOwned ? "true" : "false") << " allowed_projects=";
+                  << (Cfg.IngestWireToOwned ? "true" : "false") << " ingest_streaming_json_serializer="
+                  << (Cfg.IngestStreamingJsonSerializer ? "true" : "false") << " allowed_projects=";
         if (Cfg.AllowedProjects.empty()) {
             std::cerr << "all";
         } else {
@@ -1215,6 +1280,10 @@ struct TOtelLogsServer::TImpl {
                 }
                 std::cerr << Cfg.AllowedProjects[j];
             }
+        }
+        if (ExportCapture) {
+            std::cerr << "capture_export_requests max=" << Cfg.CaptureExportRequestsMax
+                      << " dir=" << ExportCapture->Dir() << std::endl;
         }
         std::cerr << std::endl;
         if (HealthServer) {
@@ -1232,6 +1301,10 @@ struct TOtelLogsServer::TImpl {
         }
         StopPipeline.store(true, std::memory_order_release);
         StopSweeper.store(true, std::memory_order_release);
+        StopWatchdog.store(true, std::memory_order_release);
+        if (Watchdog_.joinable()) {
+            Watchdog_.join();
+        }
         Queue.Stop();
         for (std::thread& t : Workers) {
             if (t.joinable()) {
@@ -1297,6 +1370,10 @@ public:
         const ui64 protoBytes = static_cast<ui64>(ReadBuf_.Length());
         Impl_->Metrics->AddGrpcExportRequestBytes(protoBytes);
 
+        if (Impl_->ExportCapture) {
+            Impl_->ExportCapture->TryCapture(ReadBuf_);
+        }
+
         if (Impl_->Cfg.ExportRoutableWirePrecheck && !ExportWireHasRoutableLogRows(&ReadBuf_, Impl_->Cfg)) {
             Finish(grpc::Status::OK);
             return;
@@ -1356,20 +1433,44 @@ private:
     TServerConfig Cfg_;
 };
 
-void TOtelLogsServer::TImpl::IngestWireBatch(grpc::ByteBuffer* buf, ui64 protoBytes) {
-    if (!Cfg.ExportRoutableWirePrecheck && !ExportWireHasRoutableLogRows(buf, Cfg)) {
-        return;
-    }
+void TOtelLogsServer::TImpl::HandleIngestWire(TIngestWirePayload&& payload) {
+    const ui64 protoBytes = static_cast<ui64>(payload.Buf.Length());
     THashMap<TBuck, TVector<TOwnedLogRow>, TBuckHash> buckets;
     TWireExportParseStats stats;
-    if (!ProcessExportWire(buf, Cfg, &buckets, &stats)) {
-        return;
-    }
-    if (stats.LogRows == 0) {
-        return;
+    {
+        const TIngestWorkerBusyGuard busy(Metrics.get());
+        if (!Cfg.ExportRoutableWirePrecheck && !ExportWireHasRoutableLogRows(&payload.Buf, Cfg)) {
+            return;
+        }
+        if (!ProcessExportWire(&payload.Buf, Cfg, &buckets, &stats)) {
+            return;
+        }
+        if (stats.LogRows == 0) {
+            return;
+        }
     }
     Metrics->AddPipelineIn(static_cast<ui64>(stats.LogRows), protoBytes);
     AppendOwnedShards(std::move(buckets));
+}
+
+void TOtelLogsServer::TImpl::HandleIngestProto(TIngestWirePayload& payload) {
+    thread_local google::protobuf::Arena tlsParseArena;
+    const ui64 protoBytes = static_cast<ui64>(payload.Buf.Length());
+    const TIngestWorkerBusyGuard busy(Metrics.get());
+    tlsParseArena.Reset();
+    const ologs::ExportLogsServiceRequest* req = ParseExportWire(&payload.Buf, &tlsParseArena);
+    if (!req) {
+        return;
+    }
+    if (!RunOptionalLogValidation(Cfg.ValidationEnabled, *req)) {
+        return;
+    }
+    if (!Cfg.ExportRoutableWirePrecheck && !ExportHasRoutableLogRows(Cfg, *req)) {
+        return;
+    }
+    const size_t logRows = CountExportLogRecords(*req);
+    Metrics->AddPipelineIn(static_cast<ui64>(logRows), protoBytes);
+    ProcessExport(*req);
 }
 
 void TOtelLogsServer::TImpl::ProcessExport(const ologs::ExportLogsServiceRequest& request) {
@@ -1387,7 +1488,7 @@ void TOtelLogsServer::TImpl::ProcessExport(const ologs::ExportLogsServiceRequest
         if (hasFilter && !allowed.contains(ps.Project)) {
             continue;
         }
-        const TResourceRowCtx resCtx = BuildResourceRowCtx(rl.resource(), ps);
+        const TResourceRowCtx resCtx = BuildResourceRowCtx(rl.resource(), ps, Cfg.IngestStreamingJsonSerializer);
 
         const TRoutedTable route = ResolveLogsTable(Cfg, ps.Project, ps.Service, resCtx.Cluster, perProject);
         if (route.Drop) {
@@ -1398,7 +1499,7 @@ void TOtelLogsServer::TImpl::ProcessExport(const ologs::ExportLogsServiceRequest
 
         for (const ScopeLogs& sl : rl.scope_logs()) {
             for (const LogRecord& lr : sl.log_records()) {
-                TOwnedLogRow row = MakeOwnedLogRow(resCtx, lr);
+                TOwnedLogRow row = MakeOwnedLogRow(resCtx, lr, Cfg.IngestStreamingJsonSerializer);
                 TBuck bk;
                 bk.Table = route.TablePath;
                 bk.Schema = route.PkSchema;
@@ -1439,16 +1540,34 @@ void TOtelLogsServer::TImpl::AppendOwnedShards(THashMap<TBuck, TVector<TOwnedLog
             }
             std::unique_ptr<TShardBuffer>& slot = ShardBuf_[it.first];
             if (!slot) {
-                slot = std::make_unique<TShardBuffer>(it.first);
+                slot = std::make_unique<TShardBuffer>(
+                    it.first, Cfg.ShardBufferFlushIntervalSec, Cfg.ShardBufferFlushIntervalJitterSec);
             }
             work.emplace_back(slot.get(), &it.second);
         }
     }
 
+    const ui64 minFlushBytesCfg = Cfg.ShardBufferMinFlushBytes > 0 ? static_cast<ui64>(Cfg.ShardBufferMinFlushBytes) : 0;
+    const ui64 maxFlushBytesCfg = minFlushBytesCfg > 0
+        ? ShardBufferMaxFlushBytes(minFlushBytesCfg, Cfg.ShardBufferFlushMaxOvershootPercent)
+        : 0;
+
     for (auto& [buf, chunk] : work) {
         ui64 chunkBytes = 0;
         for (const TOwnedLogRow& r : *chunk) {
             chunkBytes += OwnedRowApproxBytes(r);
+        }
+
+        if (minFlushBytesCfg > 0 && chunkBytes > 0) {
+            bool needFlushBefore = false;
+            {
+                std::lock_guard<std::mutex> g(buf->Mu);
+                needFlushBefore = buf->ApproxBytes >= minFlushBytesCfg
+                    && buf->ApproxBytes + chunkBytes > maxFlushBytesCfg;
+            }
+            if (needFlushBefore) {
+                TryFlushShardBuffer(buf);
+            }
         }
 
         bool registerSweep = false;
@@ -1474,9 +1593,10 @@ void TOtelLogsServer::TImpl::AppendOwnedShards(THashMap<TBuck, TVector<TOwnedLog
 void TOtelLogsServer::TImpl::TryFlushShardBuffer(TShardBuffer* buf) {
     constexpr size_t kHardMaxRows = 5'000'000;
     const TInstant now = TInstant::Now();
-    const ui64 flushIntervalSec = Cfg.ShardBufferFlushIntervalSec;
+    const ui64 flushIntervalSec = buf->FlushIntervalSec;
     const size_t minFlushRecords = Cfg.ShardBufferMinFlushRecords > 0 ? static_cast<size_t>(Cfg.ShardBufferMinFlushRecords) : 0;
     const ui64 minFlushBytes = Cfg.ShardBufferMinFlushBytes > 0 ? static_cast<ui64>(Cfg.ShardBufferMinFlushBytes) : 0;
+    const ui32 flushOvershootPercent = Cfg.ShardBufferFlushMaxOvershootPercent;
 
     for (;;) {
         TVector<TOwnedLogRow> out;
@@ -1518,6 +1638,16 @@ void TOtelLogsServer::TImpl::TryFlushShardBuffer(TShardBuffer* buf) {
                 buf->Rows.clear();
                 buf->ApproxBytes = 0;
                 recalcApprox = true;
+            } else if (minFlushBytes > 0) {
+                const ui64 maxFlushBytes = ShardBufferMaxFlushBytes(minFlushBytes, flushOvershootPercent);
+                SplitRowsForByteCappedFlush(buf->Rows, minFlushBytes, maxFlushBytes, &out, &restRows);
+                buf->Rows.clear();
+                buf->ApproxBytes = 0;
+                recalcApprox = true;
+                if (restRows.empty()) {
+                    buf->PendingSince = TInstant::Zero();
+                    unregisterSweep = true;
+                }
             } else {
                 out = std::move(buf->Rows);
                 buf->ApproxBytes = 0;
@@ -1545,12 +1675,54 @@ void TOtelLogsServer::TImpl::TryFlushShardBuffer(TShardBuffer* buf) {
         item.Buck = buf->Buck;
         item.Rows = std::move(out);
         item.BufForFlushOk = buf;
-        EnqueueFlushWork(std::move(item));
+        if (!EnqueueFlushWork(&item)) {
+            Metrics->IncFlushEnqueueRejected();
+            if (Cfg.FlushQueueDropOnFull) {
+                Metrics->AddFlushQueueDroppedRows(static_cast<ui64>(item.Rows.size()));
+            } else {
+                PrependRowsToShardBuffer(buf, std::move(item.Rows));
+                RegisterPendingSweep(buf);
+            }
+            break;
+        }
     }
 }
 
-void TOtelLogsServer::TImpl::EnqueueFlushWork(TFlushWorkItem item) {
-    FlushQueue.PushBlocking(std::move(item));
+bool TOtelLogsServer::TImpl::EnqueueFlushWork(TFlushWorkItem* item) {
+    return FlushQueue.TryPush(item);
+}
+
+void TOtelLogsServer::TImpl::EnqueueFlushWorkBlocking(TFlushWorkItem* item) {
+    FlushQueue.PushBlocking(item);
+}
+
+void TOtelLogsServer::TImpl::WatchdogLoop() {
+    const ui32 stallSec = Cfg.IngestStallWatchdogSec;
+    const ui32 pollSec = Max<ui32>(ui32(1), Cfg.IngestStallWatchdogPollSec);
+    ui64 lastPipelineBytes = Metrics->PipelineBytes();
+    TInstant lastProgress = TInstant::Now();
+    while (!StopWatchdog.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::seconds(pollSec));
+        const ui64 curPipelineBytes = Metrics->PipelineBytes();
+        if (curPipelineBytes != lastPipelineBytes) {
+            lastPipelineBytes = curPipelineBytes;
+            lastProgress = TInstant::Now();
+            continue;
+        }
+        const ui64 depth = Metrics->IngestQueueDepthCount();
+        const ui64 busy = Metrics->IngestWorkersBusyCount();
+        const size_t cap = Max<size_t>(size_t(1), Cfg.IngestQueueMax);
+        if (depth * 10 < cap * 9 || busy + 1 < Cfg.IngestWorkers) {
+            continue;
+        }
+        if ((TInstant::Now() - lastProgress).Seconds() < stallSec) {
+            continue;
+        }
+        Metrics->IncIngestStallDetected();
+        std::cerr << "ingest stall watchdog: queue_depth=" << depth << " ingest_workers_busy=" << busy
+                  << " pipeline_bytes=" << curPipelineBytes << " unchanged_for_sec=" << stallSec << std::endl;
+        lastProgress = TInstant::Now();
+    }
 }
 
 void TOtelLogsServer::TImpl::YdbFlushWorkerLoop() {
@@ -1559,8 +1731,16 @@ void TOtelLogsServer::TImpl::YdbFlushWorkerLoop() {
         if (!FlushQueue.WaitPop(&item)) {
             return;
         }
-        const TYdbFlushWorkerBusyGuard busy(Metrics.get());
-        BulkUpsertOwnedRows(item.Buck, std::move(item.Rows), item.BufForFlushOk);
+        try {
+            const TYdbFlushWorkerBusyGuard busy(Metrics.get());
+            BulkUpsertOwnedRows(item.Buck, std::move(item.Rows), item.BufForFlushOk);
+        } catch (const std::exception& ex) {
+            Metrics->IncFlushWorkerExceptions();
+            std::cerr << "flush worker exception: " << ex.what() << std::endl;
+        } catch (...) {
+            Metrics->IncFlushWorkerExceptions();
+            std::cerr << "flush worker unknown exception" << std::endl;
+        }
     }
 }
 
@@ -1610,10 +1790,12 @@ void TOtelLogsServer::TImpl::BulkUpsertOwnedRows(const TBuck& buck, TVector<TOwn
             if (res.IsSuccess()) {
                 Metrics->IncBulkOk();
                 Metrics->IncLogsBatchesStored();
-                Metrics->AddYdbWritten(nrows, static_cast<ui64>(schemaWire.size() + dataWire.size()));
+                const ui64 arrowWireBytes = static_cast<ui64>(schemaWire.size() + dataWire.size());
+                Metrics->AddYdbWritten(nrows, arrowWireBytes);
                 Metrics->ObserveBulkArrowEncodeMs(encodeMs);
                 Metrics->ObserveBulkYdbRpcMs(rpcMs);
                 Metrics->ObserveBulkUpsertRows(nrows);
+                Metrics->ObserveBulkUpsertPayloadBytes(arrowWireBytes);
                 if (bufForFlushOk) {
                     std::lock_guard<std::mutex> fg(bufForFlushOk->Mu);
                     bufForFlushOk->LastYdbFlushOk = TInstant::Now();
@@ -1688,7 +1870,7 @@ void TOtelLogsServer::TImpl::DrainAllShardBuffers() {
             item.Buck = buf->Buck;
             item.Rows = std::move(out);
             item.BufForFlushOk = buf;
-            EnqueueFlushWork(std::move(item));
+            EnqueueFlushWorkBlocking(&item);
         }
     }
     {

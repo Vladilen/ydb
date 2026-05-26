@@ -37,7 +37,7 @@
 | `…_log_bytes_pipeline_in_bps`, `…_log_bytes_ydb_written_bps` | Мгновенные B/s; в Prometheus — **`rate()`** по `_total` |
 | `otelcol_grpc_logs_export_in_payload_compressed_bytes`, `…_wire_bytes` | Нет отдельного учёта сжатия/framing у gRPC в C++ |
 | `…_batches_per_request` | Гистограмма «батчей на Export» не экспортируется |
-| `…_log_ydb_bulk_payload_bytes` | В Go — гистограмма размера Arrow IPC payload; в C++ запись **тот же Arrow wire** (`BulkUpsert` + `ApacheArrow`), но **отдельной метрики размера payload нет** (есть эвристика `log_bytes_ydb_written_total`) |
+| `…_log_ydb_bulk_payload_bytes` | `otel_logs_to_ydb_bulk_upsert_payload_bytes` — `schemaWire.size()+dataWire.size()` на успешный BulkUpsert |
 | `otelcol_processor_otlpwithyandexvalidation_*` | Отмена / время валидации в процессоре — **не переносились** |
 | Метрики **idx** (`idx_write_processing_time`, `idx_rows_per_batch`, …) | В `otel_logs_to_ydb` только **логи** в таблицы логов, без отдельного idx-пайплайна как в Go |
 
@@ -49,6 +49,20 @@
 4. **`log_bytes_ydb_written_total`**: **Arrow IPC** `schemaWire.size() + dataWire.size()` на успешный BulkUpsert-чанк (как Go). Это не OTLP bytes и обычно **меньше** `log_bytes_pipeline_in_total` (другой формат + фильтрация после enqueue).
 5. **Успешные RPC / батчи**: один логический сброс может дать **несколько** BulkUpsert (чанки, лимит строк на RPC); счётчики успеха отражают **факты RPC/чанков**, не «один Export = один upsert».
 6. **Гистограммы времени записи**: **`bulk_ydb_rpc_duration_milliseconds`** по смыслу ближе всего к Go `logs_write_processing_time` (только ожидание слота + `BulkUpsert` до ответа). **`bulk_arrow_encode_duration_milliseconds`** — отдельно время сборки Arrow IPC до send; сумма двух гистограмм за один успешный чанк ≈ бывший объединённый замер.
+
+### Resilience (ingest freeze after YDB outage)
+
+| Метрика / конфиг | Назначение |
+|------------------|------------|
+| `ingest_workers_busy` | Только wire/proto **parse** (не ожидание shard lock) |
+| `ingest_workers_waiting_shard_lock` | Ingest ждёт `TShardBuffer::Mu` между retry append |
+| `flush_enqueue_rejected_total` | Flush-очередь полна; ingest **не блокируется** |
+| `log_rows_flush_queue_dropped_total` | Строки **отброшены** при `flush_queue_drop_on_full: true` |
+| `flush_queue_drop_on_full` (yaml) | `false` — чанк обратно в shard buffer (RAM↑); `true` — drop |
+| `flush_enqueue_timeout_total` | (legacy) таймаут ожидания enqueue; ingest path использует только non-blocking `TryPush` |
+| `ingest_shard_lock_*` | Таймаут/сдача при contention на shard buffer |
+| `ingest_stall_detected_total` | Watchdog: очередь ≥90% + все busy + `pipeline_in` не растёт `ingest_stall_watchdog_sec` |
+| `ingest_worker_exceptions_total` | Исключение в ingest worker (поток продолжает работу) |
 
 ---
 
@@ -89,6 +103,7 @@
 | `otel_logs_to_ydb_bulk_arrow_encode_duration_milliseconds` | Гистограмма: Arrow IPC encode для чанка до отправки (**ms**; `le` 50…10000) | — (в Go encode вне `logs_write_processing_time`) | Да | |
 | `otel_logs_to_ydb_bulk_ydb_rpc_duration_milliseconds` | Гистограмма: слот `ydb_max_concurrent_bulk` + `BulkUpsert` до ответа (**ms**; `le` как у Go) | `otelcol_processor_ydb_supplier_logs_write_processing_time` | Да | |
 | `otel_logs_to_ydb_bulk_upsert_rows` | Histogram числа строк на BulkUpsert (границы как у Go: 100…100000) | `otelcol_processor_ydb_supplier_log_rows_per_batch` | Да | |
+| `otel_logs_to_ydb_bulk_upsert_payload_bytes` | Histogram Arrow IPC bytes на успешный чанк (`schemaWire+dataWire`; границы как Go `log_ydb_bulk_payload_bytes`) | `otelcol_processor_ydb_supplier_log_ydb_bulk_payload_bytes` | Да | |
 | `otel_logs_to_ydb_process_cpu_seconds` | CPU user+system, сек (на scrape; `getrusage`) | `otelcol_process_cpu_seconds` | Да | |
 | `otel_logs_to_ydb_process_memory_rss` | RSS в байтах (на scrape; Linux `statm`) | `otelcol_process_memory_rss` | Да | |
 
@@ -133,7 +148,7 @@
 | `otelcol_processor_ydb_supplier_log_rows_ydb_written` | Строки в YDB | `log_rows_ydb_written_total` | Да | |
 | `otelcol_processor_ydb_supplier_batches_per_request` | Батчей на запрос | Нет | Опц | |
 | `otelcol_processor_ydb_supplier_log_rows_per_batch` | Гистограмма строк/батч | `bulk_upsert_rows` | Да | |
-| `otelcol_processor_ydb_supplier_log_ydb_bulk_payload_bytes` | Размер Arrow payload | Нет отдельной гистограммы; запись Arrow как в Go, см. эвристику `log_bytes_ydb_written_total` | Опц | |
+| `otelcol_processor_ydb_supplier_log_ydb_bulk_payload_bytes` | Размер Arrow payload | `otel_logs_to_ydb_bulk_upsert_payload_bytes` | Да | |
 
 ## Processor `ydb_supplier` — успех / ошибки / время (Go)
 

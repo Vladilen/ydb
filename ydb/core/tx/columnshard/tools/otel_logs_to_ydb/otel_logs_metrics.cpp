@@ -22,6 +22,11 @@ static constexpr std::array<ui64, 9> DurationEdgesMs{50, 100, 250, 500, 750, 100
 /// Same as Go `view.Distribution(100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 51200, 100000)`.
 static constexpr ui64 RowEdges[] = {100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 51200, 100000};
 
+/// Same as Go `log_ydb_bulk_payload_bytes` Distribution (powers of two from 1KiB to 512GiB).
+static constexpr ui64 PayloadBytesEdges[] = {
+    1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304,
+    8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912};
+
 /// Cumulative user+system CPU seconds for this process (`getrusage`), same idea as `otelcol_process_cpu_seconds`.
 static double ReadSelfCpuSeconds() {
     struct rusage ru {};
@@ -96,6 +101,17 @@ void TPrometheusMetrics::ObserveBulkUpsertRows(ui64 rowCount) {
     ++BulkRowsInf_;
 }
 
+void TPrometheusMetrics::ObserveBulkUpsertPayloadBytes(ui64 arrowWireBytes) {
+    ++BulkPayloadBytesCount_;
+    BulkPayloadBytesSum_ += arrowWireBytes;
+    for (size_t i = 0; i < 20; ++i) {
+        if (arrowWireBytes <= PayloadBytesEdges[i]) {
+            ++BulkPayloadBytesBuckets_[i];
+        }
+    }
+    ++BulkPayloadBytesInf_;
+}
+
 void TPrometheusMetrics::RenderHistogramBulkDurationMs(
     TStringStream& ss,
     TStringBuf resourceLabelsInner,
@@ -121,15 +137,16 @@ void TPrometheusMetrics::RenderHistogramBulkDurationMs(
        << name << "_count{" << resourceLabelsInner << "} " << c << "\n";
 }
 
-void TPrometheusMetrics::RenderHistogramRows(
+template <size_t N>
+void TPrometheusMetrics::RenderHistogramLe(
     TStringStream& ss,
     TStringBuf resourceLabelsInner,
     TStringBuf name,
     TStringBuf help,
-    const std::array<ui64, 11>& edges,
-    const std::array<std::atomic<ui64>, 11>& buckets,
+    const std::array<ui64, N>& edges,
+    const std::array<std::atomic<ui64>, N>& buckets,
     const std::atomic<ui64>& infCount,
-    const std::atomic<ui64>& sumRows,
+    const std::atomic<ui64>& sumValue,
     const std::atomic<ui64>& count) const
 {
     ss << "# HELP " << name << " " << help << "\n"
@@ -140,9 +157,18 @@ void TPrometheusMetrics::RenderHistogramRows(
     }
     ss << name << "_bucket{" << resourceLabelsInner << ",le=\"+Inf\"} "
        << infCount.load(std::memory_order_relaxed) << "\n"
-       << name << "_sum{" << resourceLabelsInner << "} " << sumRows.load(std::memory_order_relaxed) << "\n"
+       << name << "_sum{" << resourceLabelsInner << "} " << sumValue.load(std::memory_order_relaxed) << "\n"
        << name << "_count{" << resourceLabelsInner << "} " << count.load(std::memory_order_relaxed) << "\n";
 }
+
+template void TPrometheusMetrics::RenderHistogramLe<11>(
+    TStringStream&, TStringBuf, TStringBuf, TStringBuf,
+    const std::array<ui64, 11>&, const std::array<std::atomic<ui64>, 11>&,
+    const std::atomic<ui64>&, const std::atomic<ui64>&, const std::atomic<ui64>&) const;
+template void TPrometheusMetrics::RenderHistogramLe<20>(
+    TStringStream&, TStringBuf, TStringBuf, TStringBuf,
+    const std::array<ui64, 20>&, const std::array<std::atomic<ui64>, 20>&,
+    const std::atomic<ui64>&, const std::atomic<ui64>&, const std::atomic<ui64>&) const;
 
 TString TPrometheusMetrics::RenderText() const {
     const TStringBuf rl = PrometheusResourceLabelsInner();
@@ -205,9 +231,36 @@ TString TPrometheusMetrics::RenderText() const {
        // << "# HELP otel_logs_to_ydb_ingest_workers_total Ingest worker threads (ingest_workers)\n"
        // << "# TYPE otel_logs_to_ydb_ingest_workers_total gauge\n"
        // << "otel_logs_to_ydb_ingest_workers_total{" << rl << "} " << IngestWorkersTotal_.load() << "\n"
-       << "# HELP otel_logs_to_ydb_ingest_workers_busy Ingest workers handling a dequeued batch (parse through ProcessExport; idle only in WaitPop)\n"
+       << "# HELP otel_logs_to_ydb_ingest_workers_busy Ingest workers in wire/proto parse (not shard-lock wait; idle only in WaitPop)\n"
        << "# TYPE otel_logs_to_ydb_ingest_workers_busy gauge\n"
        << "otel_logs_to_ydb_ingest_workers_busy{" << rl << "} " << IngestWorkersBusy_.load() << "\n"
+       << "# HELP otel_logs_to_ydb_ingest_workers_waiting_shard_lock Ingest workers waiting for TShardBuffer::Mu (append retry)\n"
+       << "# TYPE otel_logs_to_ydb_ingest_workers_waiting_shard_lock gauge\n"
+       << "otel_logs_to_ydb_ingest_workers_waiting_shard_lock{" << rl << "} " << IngestWorkersWaitingShardLock_.load() << "\n"
+       << "# HELP otel_logs_to_ydb_ingest_worker_exceptions_total Uncaught exceptions in ingest WorkerLoop (recovered)\n"
+       << "# TYPE otel_logs_to_ydb_ingest_worker_exceptions_total counter\n"
+       << "otel_logs_to_ydb_ingest_worker_exceptions_total{" << rl << "} " << IngestWorkerExceptions_.load() << "\n"
+       << "# HELP otel_logs_to_ydb_flush_worker_exceptions_total Uncaught exceptions in YDB flush WorkerLoop (recovered)\n"
+       << "# TYPE otel_logs_to_ydb_flush_worker_exceptions_total counter\n"
+       << "otel_logs_to_ydb_flush_worker_exceptions_total{" << rl << "} " << FlushWorkerExceptions_.load() << "\n"
+       << "# HELP otel_logs_to_ydb_ingest_shard_lock_timeouts_total Shard buffer lock try_lock_for timeouts (append retry)\n"
+       << "# TYPE otel_logs_to_ydb_ingest_shard_lock_timeouts_total counter\n"
+       << "otel_logs_to_ydb_ingest_shard_lock_timeouts_total{" << rl << "} " << IngestShardLockTimeouts_.load() << "\n"
+       << "# HELP otel_logs_to_ydb_ingest_shard_lock_give_up_total Parsed batches dropped after shard lock retries exhausted\n"
+       << "# TYPE otel_logs_to_ydb_ingest_shard_lock_give_up_total counter\n"
+       << "otel_logs_to_ydb_ingest_shard_lock_give_up_total{" << rl << "} " << IngestShardLockGiveUp_.load() << "\n"
+       << "# HELP otel_logs_to_ydb_flush_enqueue_timeout_total Flush queue enqueue timed out; rows rolled back to shard buffer\n"
+       << "# TYPE otel_logs_to_ydb_flush_enqueue_timeout_total counter\n"
+       << "otel_logs_to_ydb_flush_enqueue_timeout_total{" << rl << "} " << FlushEnqueueTimeout_.load() << "\n"
+       << "# HELP otel_logs_to_ydb_flush_enqueue_rejected_total Flush queue full; ingest did not block, rows returned to shard buffer\n"
+       << "# TYPE otel_logs_to_ydb_flush_enqueue_rejected_total counter\n"
+       << "otel_logs_to_ydb_flush_enqueue_rejected_total{" << rl << "} " << FlushEnqueueRejected_.load() << "\n"
+       << "# HELP otel_logs_to_ydb_log_rows_flush_queue_dropped_total Log rows dropped because flush queue was full and flush_queue_drop_on_full=true\n"
+       << "# TYPE otel_logs_to_ydb_log_rows_flush_queue_dropped_total counter\n"
+       << "otel_logs_to_ydb_log_rows_flush_queue_dropped_total{" << rl << "} " << LogRowsFlushQueueDropped_.load() << "\n"
+       << "# HELP otel_logs_to_ydb_ingest_stall_detected_total Watchdog: saturated ingest with no pipeline_in progress\n"
+       << "# TYPE otel_logs_to_ydb_ingest_stall_detected_total counter\n"
+       << "otel_logs_to_ydb_ingest_stall_detected_total{" << rl << "} " << IngestStallDetected_.load() << "\n"
        << "# HELP otel_logs_to_ydb_ydb_flush_queue_depth Shard flush chunks waiting for YDB writer threads\n"
        << "# TYPE otel_logs_to_ydb_ydb_flush_queue_depth gauge\n"
        << "otel_logs_to_ydb_ydb_flush_queue_depth{" << rl << "} " << YdbFlushQueueDepth_.load() << "\n"
@@ -268,7 +321,7 @@ TString TPrometheusMetrics::RenderText() const {
         BulkYdbRpcSumMs_,
         BulkYdbRpcCount_);
 
-    RenderHistogramRows(
+    RenderHistogramLe(
         ss,
         rl,
         TStringBuf{"otel_logs_to_ydb_bulk_upsert_rows"},
@@ -278,6 +331,21 @@ TString TPrometheusMetrics::RenderText() const {
         BulkRowsInf_,
         BulkRowsSum_,
         BulkRowsCount_);
+
+    std::array<ui64, 20> payloadEdges{};
+    for (size_t i = 0; i < 20; ++i) {
+        payloadEdges[i] = PayloadBytesEdges[i];
+    }
+    RenderHistogramLe(
+        ss,
+        rl,
+        TStringBuf{"otel_logs_to_ydb_bulk_upsert_payload_bytes"},
+        TStringBuf{"Arrow IPC wire bytes per successful BulkUpsert chunk (schema+data IPC; same as Go log_ydb_bulk_payload_bytes)"},
+        payloadEdges,
+        BulkPayloadBytesBuckets_,
+        BulkPayloadBytesInf_,
+        BulkPayloadBytesSum_,
+        BulkPayloadBytesCount_);
 
     return ss.Str();
 }

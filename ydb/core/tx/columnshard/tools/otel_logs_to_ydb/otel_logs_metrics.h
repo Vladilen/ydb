@@ -70,6 +70,46 @@ public:
     void DecIngestWorkersBusy() {
         IngestWorkersBusy_.fetch_sub(1, std::memory_order_relaxed);
     }
+    void IncIngestWorkersWaitingShardLock() {
+        IngestWorkersWaitingShardLock_.fetch_add(1, std::memory_order_relaxed);
+    }
+    void DecIngestWorkersWaitingShardLock() {
+        IngestWorkersWaitingShardLock_.fetch_sub(1, std::memory_order_relaxed);
+    }
+    void IncIngestWorkerExceptions() {
+        ++IngestWorkerExceptions_;
+    }
+    void IncFlushWorkerExceptions() {
+        ++FlushWorkerExceptions_;
+    }
+    void IncIngestShardLockTimeouts() {
+        ++IngestShardLockTimeouts_;
+    }
+    void IncIngestShardLockGiveUp() {
+        ++IngestShardLockGiveUp_;
+    }
+    void IncFlushEnqueueTimeout() {
+        ++FlushEnqueueTimeout_;
+    }
+    void IncFlushEnqueueRejected() {
+        ++FlushEnqueueRejected_;
+    }
+    void AddFlushQueueDroppedRows(ui64 logRows) {
+        LogRowsFlushQueueDropped_ += logRows;
+    }
+    void IncIngestStallDetected() {
+        ++IngestStallDetected_;
+    }
+
+    ui64 PipelineBytes() const {
+        return LogBytesPipelineIn_.load();
+    }
+    ui64 IngestWorkersBusyCount() const {
+        return IngestWorkersBusy_.load();
+    }
+    ui64 IngestQueueDepthCount() const {
+        return IngestQueueDepth_.load();
+    }
     void SetYdbFlushQueueDepth(size_t depth) {
         YdbFlushQueueDepth_.store(static_cast<ui64>(depth), std::memory_order_relaxed);
     }
@@ -103,6 +143,8 @@ public:
     /// Concurrency slot wait + BulkUpsert + ExtractValueSync until RPC completes; same ms buckets as Go `logs_write_processing_time`.
     void ObserveBulkYdbRpcMs(ui64 durationMs);
     void ObserveBulkUpsertRows(ui64 rowCount);
+    /// Arrow IPC wire bytes per successful BulkUpsert chunk (`schemaWire.size() + dataWire.size()`).
+    void ObserveBulkUpsertPayloadBytes(ui64 arrowWireBytes);
 
     void AddGrpcExportRequestBytes(ui64 bytes) {
         GrpcExportRequestBytes_ += bytes;
@@ -128,16 +170,16 @@ private:
         const std::atomic<ui64>& sumMs,
         const std::atomic<ui64>& count) const;
 
-    /// Same bucket boundaries as Go `ydb_supplier` `log_rows_per_batch`.
-    void RenderHistogramRows(
+    template <size_t N>
+    void RenderHistogramLe(
         TStringStream& ss,
         TStringBuf resourceLabelsInner,
         TStringBuf name,
         TStringBuf help,
-        const std::array<ui64, 11>& edges,
-        const std::array<std::atomic<ui64>, 11>& buckets,
+        const std::array<ui64, N>& edges,
+        const std::array<std::atomic<ui64>, N>& buckets,
         const std::atomic<ui64>& infCount,
-        const std::atomic<ui64>& sumRows,
+        const std::atomic<ui64>& sumValue,
         const std::atomic<ui64>& count) const;
 
     std::atomic<ui64> IngestAccepted_{0};
@@ -161,6 +203,15 @@ private:
     std::atomic<ui64> IngestQueueCapacity_{0};
     std::atomic<ui64> IngestWorkersTotal_{0};
     std::atomic<ui64> IngestWorkersBusy_{0};
+    std::atomic<ui64> IngestWorkersWaitingShardLock_{0};
+    std::atomic<ui64> IngestWorkerExceptions_{0};
+    std::atomic<ui64> FlushWorkerExceptions_{0};
+    std::atomic<ui64> IngestShardLockTimeouts_{0};
+    std::atomic<ui64> IngestShardLockGiveUp_{0};
+    std::atomic<ui64> FlushEnqueueTimeout_{0};
+    std::atomic<ui64> FlushEnqueueRejected_{0};
+    std::atomic<ui64> LogRowsFlushQueueDropped_{0};
+    std::atomic<ui64> IngestStallDetected_{0};
     std::atomic<ui64> YdbFlushQueueDepth_{0};
     std::atomic<ui64> YdbFlushQueueCapacity_{0};
     std::atomic<ui64> YdbFlushWorkersTotal_{0};
@@ -186,6 +237,11 @@ private:
     std::atomic<ui64> BulkRowsInf_{0};
     std::atomic<ui64> BulkRowsSum_{0};
     std::atomic<ui64> BulkRowsCount_{0};
+
+    std::array<std::atomic<ui64>, 20> BulkPayloadBytesBuckets_{};
+    std::atomic<ui64> BulkPayloadBytesInf_{0};
+    std::atomic<ui64> BulkPayloadBytesSum_{0};
+    std::atomic<ui64> BulkPayloadBytesCount_{0};
 };
 
 } // namespace NColumnShard::NOtelLogsToYdb

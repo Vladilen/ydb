@@ -6,7 +6,9 @@ SRCDIR(
 
 SRCS(
     health_check_server.cpp
+    otel_logs_anyvalue.cpp
     otel_logs_json.cpp
+    otel_logs_capture.cpp
     otel_logs_config.cpp
     otel_logs_ddl.cpp
     otel_logs_metrics.cpp
@@ -25,6 +27,7 @@ PEERDIR(
     contrib/libs/yaml-cpp
     library/cpp/http/server
     library/cpp/json
+    library/cpp/string_utils/base64
     util
     ydb/public/sdk/cpp/src/client/driver
     ydb/public/sdk/cpp/src/client/table

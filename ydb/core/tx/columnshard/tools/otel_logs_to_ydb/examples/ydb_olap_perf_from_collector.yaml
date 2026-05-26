@@ -55,6 +55,7 @@ otel_logs_to_ydb:
   shard_buffer_min_flush_records: 10000
   # shard_buffer_min_flush_bytes: 16777216
   shard_buffer_flush_interval_sec: 600
+  shard_buffer_flush_interval_jitter_sec: 120
 
   auto_create_missing_tables: true
   auto_create_partition_count_common: 24

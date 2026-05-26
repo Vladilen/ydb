@@ -37,6 +37,8 @@ struct TServerConfig {
     size_t YdbFlushWorkers = 0;
     /// Bounded queue of flush chunks between ingest workers and YDB writers.
     size_t FlushQueueMax = 4096;
+    /// If flush queue is full: drop chunk instead of returning rows to shard buffer (limits RAM).
+    bool FlushQueueDropOnFull = false;
     std::string HealthListen = "0.0.0.0:13133";
     std::string HealthPath = "/ping";
 
@@ -57,8 +59,12 @@ struct TServerConfig {
     /// Mutually exclusive with `ShardBufferMinFlushRecords`.
     /// Flush when estimated buffer size (bytes) reaches this threshold (0 = disabled).
     i64 ShardBufferMinFlushBytes = 0;
+    /// Max overshoot per flush chunk over `ShardBufferMinFlushBytes` (percent, e.g. 10 → cap at min×1.1). Used only with min_flush_bytes.
+    ui32 ShardBufferFlushMaxOvershootPercent = 10;
     /// If no successful YDB write for this shard for this long, flush pending rows (even below min size). 0 = disabled.
     ui64 ShardBufferFlushIntervalSec = 0;
+    /// Per-shard spread of `ShardBufferFlushIntervalSec` in seconds (deterministic hash of bucket). 0 = no jitter.
+    ui64 ShardBufferFlushIntervalJitterSec = 0;
     int PartitionCountCommon = 48;
     int PartitionCountDedicated = 48;
     int SupplierPoolSize = 10;
@@ -84,6 +90,30 @@ struct TServerConfig {
 
     /// Stage A: ingest worker parses wire → `TOwnedLogRow` (no protobuf tree). Default: false (Arena parse).
     bool IngestWireToOwned = false;
+
+    /// Nested OTLP map/array → JSON text via `NJsonWriter` while parsing (no `NJson::TJsonValue`).
+    /// Flat `labels`/`meta` object is still built with `JsonStringifyMap` from `THashMap`.
+    bool IngestStreamingJsonSerializer = false;
+
+    /// Save first N gRPC Export bodies as `{dir}/export_NNNNNNN.pb` (0 = disabled).
+    size_t CaptureExportRequestsMax = 0;
+    std::string CaptureExportRequestsDir;
+
+    /// Max wait for `TShardBuffer::Mu` per append attempt (0 = 5000 ms).
+    ui32 IngestShardLockTimeoutMs = 5000;
+    /// Retries when shard mutex is contended before dropping a parsed batch.
+    int IngestShardLockMaxSpins = 200;
+    ui32 IngestShardLockRetryMs = 10;
+
+    /// Max wait to enqueue a flush chunk; on timeout rows return to shard buffer (0 = 30000 ms).
+    ui32 FlushEnqueueTimeoutMs = 30000;
+
+    /// Log + metric when pipeline bytes do not grow while ingest is saturated (0 = disabled).
+    ui32 IngestStallWatchdogSec = 0;
+    ui32 IngestStallWatchdogPollSec = 15;
+
+    /// Wire parse `CodedInputStream` total bytes limit (0 = request `ByteBuffer` length).
+    ui64 IngestWireParseMaxBytes = 0;
 };
 
 /// OTLP gRPC LogsService + async pipeline → YDB BulkUpsert.
