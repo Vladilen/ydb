@@ -96,17 +96,23 @@ TDdlEnsurer::TDdlEnsurer(TServerConfig cfg)
 }
 
 TString TDdlEnsurer::BuildCreateDdl(const TString& tablePath, ELogsPkSchema schema) const {
-    const TStringBuf cm(Cfg_.LogsCompressionMessage.data(), Cfg_.LogsCompressionMessage.size());
-    const TStringBuf cl(Cfg_.LogsCompressionLabels.data(), Cfg_.LogsCompressionLabels.size());
-    const TStringBuf cz(Cfg_.LogsCompressionMeta.data(), Cfg_.LogsCompressionMeta.size());
+    auto colComp = [&](const char* name) -> TStringBuf {
+        const auto it = Cfg_.LogsColumnCompression.find(name);
+        return it != Cfg_.LogsColumnCompression.end() ? TStringBuf{it->second.data(), it->second.size()} : TStringBuf{};
+    };
+    const TStringBuf ct = colComp("timestamp");
+    const TStringBuf cr = colComp("record_id");
+    const TStringBuf cm = colComp("message");
+    const TStringBuf cl = colComp("labels");
+    const TStringBuf cz = colComp("meta");
     const int pc = (schema == ELogsPkSchema::Dedicated) ? Cfg_.PartitionCountDedicated : Cfg_.PartitionCountCommon;
     switch (schema) {
         case ELogsPkSchema::PerProjectHeap:
             return TStringBuilder() << "CREATE TABLE `" << tablePath << "` (\n"
-                                     << "    timestamp Timestamp NOT NULL,\n"
+                                     << "    timestamp Timestamp NOT NULL" << ct << ",\n"
                                      << "    service Utf8 NOT NULL,\n"
                                      << "    cluster Utf8 NOT NULL,\n"
-                                     << "    record_id Utf8 NOT NULL,\n"
+                                     << "    record_id Utf8 NOT NULL" << cr << ",\n"
                                      << "    level Int32,\n"
                                      << "    message Utf8" << cm << ",\n"
                                      << "    labels JsonDocument" << cl << ",\n"
@@ -119,8 +125,8 @@ TString TDdlEnsurer::BuildCreateDdl(const TString& tablePath, ELogsPkSchema sche
                                      << ");\n";
         case ELogsPkSchema::Dedicated:
             return TStringBuilder() << "CREATE TABLE `" << tablePath << "` (\n"
-                                     << "    timestamp Timestamp NOT NULL,\n"
-                                     << "    record_id Utf8 NOT NULL,\n"
+                                     << "    timestamp Timestamp NOT NULL" << ct << ",\n"
+                                     << "    record_id Utf8 NOT NULL" << cr << ",\n"
                                      << "    level Int32,\n"
                                      << "    message Utf8" << cm << ",\n"
                                      << "    labels JsonDocument" << cl << ",\n"
@@ -133,9 +139,9 @@ TString TDdlEnsurer::BuildCreateDdl(const TString& tablePath, ELogsPkSchema sche
                                      << ");\n";
         default:
             return TStringBuilder() << "CREATE TABLE `" << tablePath << "` (\n"
-                                     << "    timestamp Timestamp NOT NULL,\n"
+                                     << "    timestamp Timestamp NOT NULL" << ct << ",\n"
                                      << "    cluster Utf8 NOT NULL,\n"
-                                     << "    record_id Utf8 NOT NULL,\n"
+                                     << "    record_id Utf8 NOT NULL" << cr << ",\n"
                                      << "    level Int32,\n"
                                      << "    message Utf8" << cm << ",\n"
                                      << "    labels JsonDocument" << cl << ",\n"

@@ -75,9 +75,8 @@ struct TServerConfig {
     std::string TtlExternalPath;
     std::string TtlExternalTierLiteral;
 
-    std::string LogsCompressionMessage;
-    std::string LogsCompressionLabels;
-    std::string LogsCompressionMeta;
+    /// Map from column name to compression clause string, e.g. {"message": " COMPRESSION (algorithm = zstd)"}.
+    std::unordered_map<std::string, std::string> LogsColumnCompression;
 
     int MaxRetries = 3;
     ui32 RetryBackoffMs = 200;

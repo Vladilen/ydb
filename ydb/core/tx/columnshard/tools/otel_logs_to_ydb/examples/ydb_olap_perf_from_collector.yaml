@@ -68,6 +68,12 @@ otel_logs_to_ydb:
       interval: "48h"
 
   logs_column_compression:
+    timestamp:
+      algorithm: zstd
+      level: 1
+    record_id:
+      algorithm: zstd
+      level: 1
     message:
       algorithm: zstd
       level: 4
