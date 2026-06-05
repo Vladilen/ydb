@@ -150,6 +150,19 @@ bool LoadOtelLogsYaml(const TString& path, TServerConfig* cfg, TString* errorMsg
         cfg->LogsDir = NodeAsString(n["logs_dir"], TString{cfg->LogsDir.data(), cfg->LogsDir.size()});
         cfg->YdbCommonLogsDir = NodeAsString(n["ydb_common_logs_dir"], TString{cfg->YdbCommonLogsDir.data(), cfg->YdbCommonLogsDir.size()});
         cfg->YdbDedicatedLogsDir = NodeAsString(n["ydb_dedicated_logs_dir"], TString{cfg->YdbDedicatedLogsDir.data(), cfg->YdbDedicatedLogsDir.size()});
+        cfg->YdbCommonLogsDirBatchId = NodeAsString(n["ydb_common_logs_dir_batch_id"], TString{cfg->YdbCommonLogsDirBatchId.data(), cfg->YdbCommonLogsDirBatchId.size()});
+        cfg->YdbDedicatedLogsDirBatchId = NodeAsString(n["ydb_dedicated_logs_dir_batch_id"], TString{cfg->YdbDedicatedLogsDirBatchId.data(), cfg->YdbDedicatedLogsDirBatchId.size()});
+        if (const YAML::Node bis = n["batch_id_services"]) {
+            if (bis.IsSequence()) {
+                cfg->BatchIdServices.clear();
+                for (const YAML::Node& e : bis) {
+                    const std::string svc = e.as<std::string>("");
+                    if (!svc.empty()) {
+                        cfg->BatchIdServices.push_back(svc);
+                    }
+                }
+            }
+        }
         cfg->TableLayout = NodeAsString(n["table_layout"], TString{cfg->TableLayout.data(), cfg->TableLayout.size()});
         cfg->WriteOnlyDedicated = NodeAsBool(n["write_only_dedicated"], cfg->WriteOnlyDedicated);
         cfg->BatchByShardHash = NodeAsBool(n["batch_by_shard_hash"], cfg->BatchByShardHash);

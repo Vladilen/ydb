@@ -49,6 +49,11 @@ struct TServerConfig {
 
     std::string YdbCommonLogsDir = "logs_store";
     std::string YdbDedicatedLogsDir = "logs";
+    /// Used only for services in BatchIdServices whitelist.
+    std::string YdbCommonLogsDirBatchId;
+    std::string YdbDedicatedLogsDirBatchId;
+    /// Whitelist of service names routed to the batch_id dirs (any cluster).
+    std::vector<std::string> BatchIdServices;
     bool WriteOnlyDedicated = false;
     std::unordered_map<std::string, TProjectRoutingRule> ProjectRouting;
 

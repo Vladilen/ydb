@@ -12,6 +12,7 @@ struct TOwnedLogRow {
     TString Service;
     TString Cluster;
     TString RecordId;
+    TString BatchId; // unique per gRPC Export request
     i32 Level = 0;
     TString Message;
     TString LabelsJson;

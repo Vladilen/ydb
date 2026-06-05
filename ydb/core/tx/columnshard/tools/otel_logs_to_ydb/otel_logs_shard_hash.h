@@ -9,13 +9,15 @@
 namespace NColumnShard::NOtelLogsToYdb {
 
 enum class ELogsPkSchema : int {
+    // Default schemas: no batch_id column (used for ydb_common/dedicated_logs_dir).
     PerService = 0,       // (timestamp, cluster, record_id)
     PerProjectHeap = 1,   // (timestamp, service, cluster, record_id)
     Dedicated = 2,        // (timestamp, record_id)
+    // BatchPartitioned schemas: batch_id column present (used for ydb_*_logs_dir_batch_id).
+    PerServiceBatchPartitioned = 3,       // (timestamp, cluster, batch_id, record_id)
+    PerProjectHeapBatchPartitioned = 4,   // (timestamp, service, cluster, batch_id, record_id)
+    DedicatedBatchPartitioned = 5,        // (timestamp, batch_id, record_id)
 };
-
-/// Partition hash (XXH64 seed 0) — same byte layout as Go `shardhash` for given schema.
-ui64 HashPartitionKey(ELogsPkSchema schema, TInstant ts, TStringBuf a, TStringBuf b, TStringBuf c);
 
 /// Maps hash to shard index [0, numShards), same as Go `ShardIndex`.
 /// `numShards` must equal table `PARTITION_COUNT` (auto_create_partition_count_* in config).

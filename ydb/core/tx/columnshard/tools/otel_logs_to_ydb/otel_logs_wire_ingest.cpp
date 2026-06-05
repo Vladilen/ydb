@@ -903,13 +903,13 @@ bool WireParseScopeLogs(
     CIS* input,
     ui32 len,
     const TResourceWireCtx& res,
-    const TRoutedTable& route,
+    const std::vector<TRoutedTable>& routes,
     const TServerConfig& cfg,
+    const TString& batchId,
     THashMap<TBuck, TVector<TOwnedLogRow>, TBuckHash>* buckets,
     size_t* logRows)
 {
     const auto limit = input->PushLimit(static_cast<int>(len));
-    const int partCount = (route.PkSchema == ELogsPkSchema::Dedicated) ? cfg.PartitionCountDedicated : cfg.PartitionCountCommon;
 
     while (input->BytesUntilLimit() > 0) {
         const ui32 tag = input->ReadTag();
@@ -935,15 +935,19 @@ bool WireParseScopeLogs(
             input->PopLimit(limit);
             return false;
         }
+        row.BatchId = batchId;
 
-        TBuck bk;
-        bk.Table = route.TablePath;
-        bk.Schema = route.PkSchema;
-        bk.Shard = 0;
-        if (cfg.BatchByShardHash && partCount > 0) {
-            bk.Shard = ShardIndexFromHash(HashOwnedLogRow(route.PkSchema, row), partCount);
+        for (const TRoutedTable& route : routes) {
+            const int partCount = (route.PkSchema == ELogsPkSchema::DedicatedBatchPartitioned || route.PkSchema == ELogsPkSchema::Dedicated) ? cfg.PartitionCountDedicated : cfg.PartitionCountCommon;
+            TBuck bk;
+            bk.Table = route.TablePath;
+            bk.Schema = route.PkSchema;
+            bk.Shard = 0;
+            if (cfg.BatchByShardHash && partCount > 0) {
+                bk.Shard = ShardIndexFromHash(HashOwnedLogRow(route.PkSchema, row), partCount);
+            }
+            (*buckets)[bk].push_back(row);
         }
-        (*buckets)[bk].push_back(std::move(row));
         ++*logRows;
     }
     input->PopLimit(limit);
@@ -970,6 +974,7 @@ bool WireParseResourceLogsInner(
     const THashSet<TString>& allowed,
     bool hasFilter,
     const TResourceWireCtx& res,
+    const TString& batchId,
     THashMap<TBuck, TVector<TOwnedLogRow>, TBuckHash>* buckets,
     size_t* logRows)
 {
@@ -994,15 +999,16 @@ bool WireParseResourceLogsInner(
             }
             continue;
         }
-        const TRoutedTable route = ResolveLogsTable(
+        auto routes = ResolveLogsTables(
             cfg, res.Project, res.Service, res.Cluster, IsPerProjectLayout(cfg));
-        if (route.Drop) {
+        routes.erase(std::remove_if(routes.begin(), routes.end(), [](const TRoutedTable& r) { return r.Drop; }), routes.end());
+        if (routes.empty()) {
             if (!sub->Skip(static_cast<int>(slen))) {
                 return false;
             }
             continue;
         }
-        if (!WireParseScopeLogs(sub, slen, res, route, cfg, buckets, logRows)) {
+        if (!WireParseScopeLogs(sub, slen, res, routes, cfg, batchId, buckets, logRows)) {
             return false;
         }
     }
@@ -1015,6 +1021,7 @@ bool WireParseResourceLogs(
     const TServerConfig& cfg,
     const THashSet<TString>& allowed,
     bool hasFilter,
+    const TString& batchId,
     THashMap<TBuck, TVector<TOwnedLogRow>, TBuckHash>* buckets,
     size_t* logRows)
 {
@@ -1073,7 +1080,7 @@ bool WireParseResourceLogs(
     }
 
     CIS sub(blobData, blobSize);
-    return WireParseResourceLogsInner(&sub, cfg, allowed, hasFilter, res, buckets, logRows);
+    return WireParseResourceLogsInner(&sub, cfg, allowed, hasFilter, res, batchId, buckets, logRows);
 }
 
 } // namespace
@@ -1100,6 +1107,8 @@ bool ProcessExportWire(
     }
     const bool hasFilter = !allowed.empty();
 
+    const TString batchId = CreateGuidAsString();
+
     CIS coded(&reader);
     size_t logRows = 0;
 
@@ -1118,7 +1127,7 @@ bool ProcessExportWire(
         if (!coded.ReadVarint32(&len)) {
             return false;
         }
-        if (!WireParseResourceLogs(&coded, len, cfg, allowed, hasFilter, buckets, &logRows)) {
+        if (!WireParseResourceLogs(&coded, len, cfg, allowed, hasFilter, batchId, buckets, &logRows)) {
             return false;
         }
     }

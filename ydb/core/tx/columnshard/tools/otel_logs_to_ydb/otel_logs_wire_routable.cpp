@@ -267,8 +267,13 @@ bool ResourceLogsGroupRoutable(CIS* input, ui32 len, const TServerConfig& cfg) {
     }
 
     const bool perProject = (cfg.TableLayout == "per_project");
-    const TRoutedTable route = ResolveLogsTable(cfg, project, service, cluster, perProject);
-    return !route.Drop;
+    const auto routes = ResolveLogsTables(cfg, project, service, cluster, perProject);
+    for (const auto& r : routes) {
+        if (!r.Drop) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace

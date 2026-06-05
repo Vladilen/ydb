@@ -105,8 +105,11 @@ TString TDdlEnsurer::BuildCreateDdl(const TString& tablePath, ELogsPkSchema sche
     const TStringBuf cm = colComp("message");
     const TStringBuf cl = colComp("labels");
     const TStringBuf cz = colComp("meta");
-    const int pc = (schema == ELogsPkSchema::Dedicated) ? Cfg_.PartitionCountDedicated : Cfg_.PartitionCountCommon;
+    const TStringBuf cb = colComp("batch_id");
+    const bool isDedicated = (schema == ELogsPkSchema::DedicatedBatchPartitioned || schema == ELogsPkSchema::Dedicated);
+    const int pc = isDedicated ? Cfg_.PartitionCountDedicated : Cfg_.PartitionCountCommon;
     switch (schema) {
+        // Default schemas: no batch_id column.
         case ELogsPkSchema::PerProjectHeap:
             return TStringBuilder() << "CREATE TABLE `" << tablePath << "` (\n"
                                      << "    timestamp Timestamp NOT NULL" << ct << ",\n"
@@ -137,7 +140,7 @@ TString TDdlEnsurer::BuildCreateDdl(const TString& tablePath, ELogsPkSchema sche
                                      << "    STORE = COLUMN,\n"
                                      << "    PARTITION_COUNT = " << pc << "\n"
                                      << ");\n";
-        default:
+        case ELogsPkSchema::PerService:
             return TStringBuilder() << "CREATE TABLE `" << tablePath << "` (\n"
                                      << "    timestamp Timestamp NOT NULL" << ct << ",\n"
                                      << "    cluster Utf8 NOT NULL,\n"
@@ -148,6 +151,56 @@ TString TDdlEnsurer::BuildCreateDdl(const TString& tablePath, ELogsPkSchema sche
                                      << "    meta JsonDocument" << cz << ",\n"
                                      << "    PRIMARY KEY (timestamp, cluster, record_id)\n"
                                      << ") PARTITION BY HASH (timestamp, cluster, record_id)\n"
+                                     << "WITH (\n"
+                                     << "    STORE = COLUMN,\n"
+                                     << "    PARTITION_COUNT = " << pc << "\n"
+                                     << ");\n";
+        // BatchPartitioned schemas: batch_id column present.
+        case ELogsPkSchema::PerProjectHeapBatchPartitioned:
+            return TStringBuilder() << "CREATE TABLE `" << tablePath << "` (\n"
+                                     << "    timestamp Timestamp NOT NULL" << ct << ",\n"
+                                     << "    batch_id Utf8 NOT NULL" << cb << ",\n"
+                                     << "    service Utf8 NOT NULL,\n"
+                                     << "    cluster Utf8 NOT NULL,\n"
+                                     << "    record_id Utf8 NOT NULL" << cr << ",\n"
+                                     << "    level Int32,\n"
+                                     << "    message Utf8" << cm << ",\n"
+                                     << "    labels JsonDocument" << cl << ",\n"
+                                     << "    meta JsonDocument" << cz << ",\n"
+                                     << "    PRIMARY KEY (timestamp, service, cluster, batch_id, record_id)\n"
+                                     << ") PARTITION BY HASH (service, cluster, batch_id)\n"
+                                     << "WITH (\n"
+                                     << "    STORE = COLUMN,\n"
+                                     << "    PARTITION_COUNT = " << pc << "\n"
+                                     << ");\n";
+        case ELogsPkSchema::DedicatedBatchPartitioned:
+            return TStringBuilder() << "CREATE TABLE `" << tablePath << "` (\n"
+                                     << "    timestamp Timestamp NOT NULL" << ct << ",\n"
+                                     << "    batch_id Utf8 NOT NULL" << cb << ",\n"
+                                     << "    record_id Utf8 NOT NULL" << cr << ",\n"
+                                     << "    level Int32,\n"
+                                     << "    message Utf8" << cm << ",\n"
+                                     << "    labels JsonDocument" << cl << ",\n"
+                                     << "    meta JsonDocument" << cz << ",\n"
+                                     << "    PRIMARY KEY (timestamp, batch_id, record_id)\n"
+                                     << ") PARTITION BY HASH (batch_id)\n"
+                                     << "WITH (\n"
+                                     << "    STORE = COLUMN,\n"
+                                     << "    PARTITION_COUNT = " << pc << "\n"
+                                     << ");\n";
+        case ELogsPkSchema::PerServiceBatchPartitioned:
+        default:
+            return TStringBuilder() << "CREATE TABLE `" << tablePath << "` (\n"
+                                     << "    timestamp Timestamp NOT NULL" << ct << ",\n"
+                                     << "    batch_id Utf8 NOT NULL" << cb << ",\n"
+                                     << "    cluster Utf8 NOT NULL,\n"
+                                     << "    record_id Utf8 NOT NULL" << cr << ",\n"
+                                     << "    level Int32,\n"
+                                     << "    message Utf8" << cm << ",\n"
+                                     << "    labels JsonDocument" << cl << ",\n"
+                                     << "    meta JsonDocument" << cz << ",\n"
+                                     << "    PRIMARY KEY (timestamp, cluster, batch_id, record_id)\n"
+                                     << ") PARTITION BY HASH (cluster, batch_id)\n"
                                      << "WITH (\n"
                                      << "    STORE = COLUMN,\n"
                                      << "    PARTITION_COUNT = " << pc << "\n"
