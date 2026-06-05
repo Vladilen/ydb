@@ -1,4 +1,5 @@
 RECURSE(
-    lib
     bin
+    lib
+    sender
 )
