@@ -5,7 +5,9 @@
 
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/table/table.h>
 
+#include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace NColumnShard::NOtelLogsToYdb {
@@ -31,9 +33,14 @@ private:
         const TString& yql,
         TString* err);
 
+    struct TEnsureState {
+        std::mutex Mu;
+    };
+
     TServerConfig Cfg_;
     std::mutex Mu_;
     std::unordered_set<std::string> Ensured_;
+    std::unordered_map<std::string, std::shared_ptr<TEnsureState>> EnsureStates_;
 };
 
 } // namespace NColumnShard::NOtelLogsToYdb

@@ -225,12 +225,27 @@ bool TDdlEnsurer::ExecScheme(
 
 bool TDdlEnsurer::EnsureLogsTable(NYdb::NTable::TTableClient& client, const TString& tablePath, ELogsPkSchema schema, TString* err) {
     const std::string key(tablePath.data(), tablePath.size());
+    std::shared_ptr<TEnsureState> state;
     {
         std::lock_guard<std::mutex> g(Mu_);
-        if (Ensured_.count(key)) {
+        if (Ensured_.contains(key)) {
+            return true;
+        }
+        std::shared_ptr<TEnsureState>& slot = EnsureStates_[key];
+        if (!slot) {
+            slot = std::make_shared<TEnsureState>();
+        }
+        state = slot;
+    }
+
+    std::lock_guard<std::mutex> tableLock(state->Mu);
+    {
+        std::lock_guard<std::mutex> g(Mu_);
+        if (Ensured_.contains(key)) {
             return true;
         }
     }
+
     TString e;
     const TString create = BuildCreateDdl(tablePath, schema);
     const TString ttl = BuildTtlDdl(tablePath);
