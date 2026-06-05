@@ -77,13 +77,15 @@ void LogDdlBundle(
     const TString& tablePath,
     const TString& create,
     const TString& ttl,
-    const TString& compaction)
+    const TString& compaction,
+    const TString& subcolumns)
 {
     std::cerr << "Auto-DDL bundle (failed at " << failedStep << ") table=" << tablePath << ":\n"
               << "--- create ---\n"
               << create << "--- ttl ---\n"
               << ttl << "--- compaction ---\n"
-              << compaction << std::endl;
+              << compaction << "\n--- subcolumns ---\n"
+              << subcolumns << std::endl;
 }
 
 } // namespace
@@ -172,6 +174,22 @@ TString TDdlEnsurer::BuildCompactionDdl(const TString& tablePath) const {
                             << j << "`);";
 }
 
+TString TDdlEnsurer::BuildSubcolumnsDdl(const TString& tablePath) const {
+    auto alterColumn = [&tablePath](TStringBuf columnName) {
+        return TStringBuilder() << "ALTER OBJECT `" << tablePath
+                                << "` (TYPE TABLE) SET (ACTION=ALTER_COLUMN, NAME=" << columnName << ", "
+                                << "`DATA_EXTRACTOR_CLASS_NAME`=`JSON_SCANNER`, "
+                                << "`SCAN_FIRST_LEVEL_ONLY`=`false`, "
+                                << "`DATA_ACCESSOR_CONSTRUCTOR.CLASS_NAME`=`SUB_COLUMNS`, "
+                                << "`FORCE_SIMD_PARSING`=`false`, "
+                                << "`COLUMNS_LIMIT`=`1024`, "
+                                << "`SPARSED_DETECTOR_KFF`=`20`, "
+                                << "`MEM_LIMIT_CHUNK`=`52428800`, "
+                                << "`OTHERS_ALLOWED_FRACTION`=`0`);";
+    };
+    return TStringBuilder() << alterColumn("meta") << "\n" << alterColumn("labels");
+}
+
 bool TDdlEnsurer::ExecScheme(
     NYdb::NTable::TTableClient& client,
     TStringBuf step,
@@ -211,6 +229,7 @@ bool TDdlEnsurer::EnsureLogsTable(NYdb::NTable::TTableClient& client, const TStr
     const TString create = BuildCreateDdl(tablePath, schema);
     const TString ttl = BuildTtlDdl(tablePath);
     const TString compaction = BuildCompactionDdl(tablePath);
+    const TString subcolumns = BuildSubcolumnsDdl(tablePath);
     if (!ExecScheme(client, "create table", tablePath, create, &e)) {
         TStringBuf eb(e);
         const bool already = eb.Contains("AlreadyExists") || eb.Contains("already exists") || eb.Contains("ALREADY_EXISTS");
@@ -218,7 +237,7 @@ bool TDdlEnsurer::EnsureLogsTable(NYdb::NTable::TTableClient& client, const TStr
             if (err) {
                 *err = TStringBuilder() << "create table: " << e;
             }
-            LogDdlBundle("create table", tablePath, create, ttl, compaction);
+            LogDdlBundle("create table", tablePath, create, ttl, compaction, subcolumns);
             return false;
         }
     }
@@ -226,14 +245,21 @@ bool TDdlEnsurer::EnsureLogsTable(NYdb::NTable::TTableClient& client, const TStr
         if (err) {
             *err = TStringBuilder() << "set ttl: " << e;
         }
-        LogDdlBundle("set ttl", tablePath, create, ttl, compaction);
+        LogDdlBundle("set ttl", tablePath, create, ttl, compaction, subcolumns);
         return false;
     }
     if (!ExecScheme(client, "set compaction", tablePath, compaction, &e)) {
         if (err) {
             *err = TStringBuilder() << "set compaction: " << e;
         }
-        LogDdlBundle("set compaction", tablePath, create, ttl, compaction);
+        LogDdlBundle("set compaction", tablePath, create, ttl, compaction, subcolumns);
+        return false;
+    }
+    if (!ExecScheme(client, "set subcolumns", tablePath, subcolumns, &e)) {
+        if (err) {
+            *err = TStringBuilder() << "set subcolumns: " << e;
+        }
+        LogDdlBundle("set subcolumns", tablePath, create, ttl, compaction, subcolumns);
         return false;
     }
     std::lock_guard<std::mutex> g(Mu_);

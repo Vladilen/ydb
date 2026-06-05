@@ -22,6 +22,7 @@ private:
     TString BuildCreateDdl(const TString& tablePath, ELogsPkSchema schema) const;
     TString BuildTtlDdl(const TString& tablePath) const;
     TString BuildCompactionDdl(const TString& tablePath) const;
+    TString BuildSubcolumnsDdl(const TString& tablePath) const;
 
     bool ExecScheme(
         NYdb::NTable::TTableClient& client,
