@@ -53,9 +53,52 @@ TString JoinLogsPath(const TString& prefix, const TString& logsDirSeg, const TSt
 
 } // namespace
 
-TRoutedTable ResolveLogsTable(const TServerConfig& cfg, const TString& project, const TString& service, const TString& cluster, bool perProjectLayout) {
-    TRoutedTable out;
+/// Returns true if the service name is in the batch_id whitelist (any cluster).
+static bool IsInBatchIdWhitelist(const TServerConfig& cfg, const TString& service) {
+    const std::string svc(service.data(), service.size());
+    for (const std::string& e : cfg.BatchIdServices) {
+        if (e == svc) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Build the default (no-batch_id) TRoutedTable for a given path and schema family.
+static TRoutedTable MakeDefaultRoute(
+    const TServerConfig& cfg,
+    const TString& logsDir,
+    const TString& suffix,
+    ELogsPkSchema schema,
+    bool drop)
+{
+    TRoutedTable r;
+    r.TablePath = JoinLogsPath(TString{cfg.TablesPrefix.data(), cfg.TablesPrefix.size()}, logsDir, suffix);
+    r.PkSchema = schema;
+    r.Drop = drop;
+    return r;
+}
+
+/// Build the BatchPartitioned TRoutedTable for a given path and schema family.
+static TRoutedTable MakeBatchPartitionedRoute(
+    const TServerConfig& cfg,
+    const TString& logsDirBatchId,
+    const TString& suffix,
+    ELogsPkSchema schema)
+{
+    TRoutedTable r;
+    r.TablePath = JoinLogsPath(TString{cfg.TablesPrefix.data(), cfg.TablesPrefix.size()}, logsDirBatchId, suffix);
+    r.PkSchema = schema;
+    return r;
+}
+
+std::vector<TRoutedTable> ResolveLogsTables(const TServerConfig& cfg, const TString& project, const TString& service, const TString& cluster, bool perProjectLayout) {
     bool isDedicatedTarget = false;
+    const bool hasBatchIdDir_common = !cfg.YdbCommonLogsDirBatchId.empty();
+    const bool hasBatchIdDir_dedicated = !cfg.YdbDedicatedLogsDirBatchId.empty();
+    const bool addBatchPartitioned = IsInBatchIdWhitelist(cfg, service);
+
+    std::vector<TRoutedTable> result;
 
     const std::string projKey(project.data(), project.size());
     auto itRule = cfg.ProjectRouting.find(projKey);
@@ -70,44 +113,68 @@ TRoutedTable ResolveLogsTable(const TServerConfig& cfg, const TString& project, 
             TString es(de.Service.data(), de.Service.size());
             if (ec == cluster && es == service) {
                 TString suffix = JoinParts({project, SanitizeSeg(cluster), SanitizeSeg(service)});
-                out.TablePath = JoinLogsPath(TString{cfg.TablesPrefix.data(), cfg.TablesPrefix.size()},
-                    TString{cfg.YdbDedicatedLogsDir.data(), cfg.YdbDedicatedLogsDir.size()}, suffix);
-                out.PkSchema = ELogsPkSchema::Dedicated;
-                isDedicatedTarget = true;
-                if (cfg.WriteOnlyDedicated) {
-                    out.Drop = false;
+                result.push_back(MakeDefaultRoute(cfg,
+                    TString{cfg.YdbDedicatedLogsDir.data(), cfg.YdbDedicatedLogsDir.size()},
+                    suffix, ELogsPkSchema::Dedicated, false));
+                if (addBatchPartitioned && hasBatchIdDir_dedicated) {
+                    result.push_back(MakeBatchPartitionedRoute(cfg,
+                        TString{cfg.YdbDedicatedLogsDirBatchId.data(), cfg.YdbDedicatedLogsDirBatchId.size()},
+                        suffix, ELogsPkSchema::DedicatedBatchPartitioned));
                 }
-                return out;
+                isDedicatedTarget = true;
+                return result;
             }
         }
         if (perProjectLayout) {
             TString suffix = JoinParts({project, SanitizeSeg(baseTable)});
-            out.TablePath = JoinLogsPath(TString{cfg.TablesPrefix.data(), cfg.TablesPrefix.size()},
-                TString{cfg.YdbCommonLogsDir.data(), cfg.YdbCommonLogsDir.size()}, suffix);
-            out.PkSchema = ELogsPkSchema::PerProjectHeap;
+            result.push_back(MakeDefaultRoute(cfg,
+                TString{cfg.YdbCommonLogsDir.data(), cfg.YdbCommonLogsDir.size()},
+                suffix, ELogsPkSchema::PerProjectHeap, false));
+            if (addBatchPartitioned && hasBatchIdDir_common) {
+                result.push_back(MakeBatchPartitionedRoute(cfg,
+                    TString{cfg.YdbCommonLogsDirBatchId.data(), cfg.YdbCommonLogsDirBatchId.size()},
+                    suffix, ELogsPkSchema::PerProjectHeapBatchPartitioned));
+            }
         } else {
             TString suffix = JoinParts({project, SanitizeSeg(cluster), SanitizeSeg(service)});
-            out.TablePath = JoinLogsPath(TString{cfg.TablesPrefix.data(), cfg.TablesPrefix.size()},
-                TString{cfg.YdbCommonLogsDir.data(), cfg.YdbCommonLogsDir.size()}, suffix);
-            out.PkSchema = ELogsPkSchema::PerService;
+            result.push_back(MakeDefaultRoute(cfg,
+                TString{cfg.YdbCommonLogsDir.data(), cfg.YdbCommonLogsDir.size()},
+                suffix, ELogsPkSchema::PerService, false));
+            if (addBatchPartitioned && hasBatchIdDir_common) {
+                result.push_back(MakeBatchPartitionedRoute(cfg,
+                    TString{cfg.YdbCommonLogsDirBatchId.data(), cfg.YdbCommonLogsDirBatchId.size()},
+                    suffix, ELogsPkSchema::PerServiceBatchPartitioned));
+            }
         }
     } else {
         if (perProjectLayout) {
-            out.TablePath = JoinLogsPath(TString{cfg.TablesPrefix.data(), cfg.TablesPrefix.size()},
-                TString{cfg.LogsDir.data(), cfg.LogsDir.size()}, project);
-            out.PkSchema = ELogsPkSchema::PerProjectHeap;
+            result.push_back(MakeDefaultRoute(cfg,
+                TString{cfg.LogsDir.data(), cfg.LogsDir.size()},
+                project, ELogsPkSchema::PerProjectHeap, false));
+            if (addBatchPartitioned && hasBatchIdDir_common) {
+                result.push_back(MakeBatchPartitionedRoute(cfg,
+                    TString{cfg.YdbCommonLogsDirBatchId.data(), cfg.YdbCommonLogsDirBatchId.size()},
+                    project, ELogsPkSchema::PerProjectHeapBatchPartitioned));
+            }
         } else {
             TString suffix = JoinParts({project, SanitizeSeg(service)});
-            out.TablePath = JoinLogsPath(TString{cfg.TablesPrefix.data(), cfg.TablesPrefix.size()},
-                TString{cfg.LogsDir.data(), cfg.LogsDir.size()}, suffix);
-            out.PkSchema = ELogsPkSchema::PerService;
+            result.push_back(MakeDefaultRoute(cfg,
+                TString{cfg.LogsDir.data(), cfg.LogsDir.size()},
+                suffix, ELogsPkSchema::PerService, false));
+            if (addBatchPartitioned && hasBatchIdDir_common) {
+                result.push_back(MakeBatchPartitionedRoute(cfg,
+                    TString{cfg.YdbCommonLogsDirBatchId.data(), cfg.YdbCommonLogsDirBatchId.size()},
+                    suffix, ELogsPkSchema::PerServiceBatchPartitioned));
+            }
         }
     }
 
     if (cfg.WriteOnlyDedicated && !isDedicatedTarget) {
-        out.Drop = true;
+        for (auto& r : result) {
+            r.Drop = true;
+        }
     }
-    return out;
+    return result;
 }
 
 } // namespace NColumnShard::NOtelLogsToYdb

@@ -49,6 +49,11 @@ struct TServerConfig {
 
     std::string YdbCommonLogsDir = "logs_store";
     std::string YdbDedicatedLogsDir = "logs";
+    /// Used only for services in BatchIdServices whitelist.
+    std::string YdbCommonLogsDirBatchId;
+    std::string YdbDedicatedLogsDirBatchId;
+    /// Whitelist of service names routed to the batch_id dirs (any cluster).
+    std::vector<std::string> BatchIdServices;
     bool WriteOnlyDedicated = false;
     std::unordered_map<std::string, TProjectRoutingRule> ProjectRouting;
 
@@ -75,9 +80,8 @@ struct TServerConfig {
     std::string TtlExternalPath;
     std::string TtlExternalTierLiteral;
 
-    std::string LogsCompressionMessage;
-    std::string LogsCompressionLabels;
-    std::string LogsCompressionMeta;
+    /// Map from column name to compression clause string, e.g. {"message": " COMPRESSION (algorithm = zstd)"}.
+    std::unordered_map<std::string, std::string> LogsColumnCompression;
 
     int MaxRetries = 3;
     ui32 RetryBackoffMs = 200;

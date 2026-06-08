@@ -414,8 +414,15 @@ bool ExportHasRoutableLogRows(const TServerConfig& cfg, const ologs::ExportLogsS
         THashMap<TString, TString> rlab;
         THashMap<TString, TString> rmeta;
         SplitResourceAttributes(rl.resource(), &cluster, &rlab, &rmeta, /*streamingJson*/ false);
-        const TRoutedTable route = ResolveLogsTable(cfg, ps.Project, ps.Service, cluster, perProject);
-        if (route.Drop) {
+        const auto routes = ResolveLogsTables(cfg, ps.Project, ps.Service, cluster, perProject);
+        bool allDrop = true;
+        for (const auto& r : routes) {
+            if (!r.Drop) {
+                allDrop = false;
+                break;
+            }
+        }
+        if (allDrop) {
             continue;
         }
         for (const ScopeLogs& sl : rl.scope_logs()) {
@@ -619,8 +626,8 @@ struct TPrometheusHttpServer {
 };
 
 static ui64 OwnedRowApproxBytes(const TOwnedLogRow& r) noexcept {
-    return static_cast<ui64>(r.Service.size() + r.Cluster.size() + r.RecordId.size() + r.Message.size() + r.LabelsJson.size()
-        + r.MetaJson.size() + 64);
+    return static_cast<ui64>(r.Service.size() + r.Cluster.size() + r.RecordId.size() + r.BatchId.size() + r.Message.size()
+        + r.LabelsJson.size() + r.MetaJson.size() + 64);
 }
 
 static TOwnedLogRow MakeOwnedLogRow(const TResourceRowCtx& res, const LogRecord& lr, bool streamingJson) {
@@ -811,7 +818,7 @@ static void SerializeLogsBulkArrow(
             columns = {std::move(a0), std::move(a1), std::move(a2), std::move(a3), std::move(a4), std::move(a5)};
             break;
         }
-        default: {
+        case ELogsPkSchema::PerService: {
             schema = std::make_shared<arrow::Schema>(std::vector<std::shared_ptr<arrow::Field>>{
                 arrow::field("timestamp", tsType, false),
                 arrow::field("cluster", arrow::utf8(), false),
@@ -855,6 +862,159 @@ static void SerializeLogsBulkArrow(
             ArrowCheckStatus(metaB.Finish(&a6), "metaB.Finish");
             columns = {std::move(a0), std::move(a1), std::move(a2), std::move(a3), std::move(a4), std::move(a5), std::move(a6)};
             break;
+        }
+        case ELogsPkSchema::PerProjectHeapBatchPartitioned: {
+            schema = std::make_shared<arrow::Schema>(std::vector<std::shared_ptr<arrow::Field>>{
+                arrow::field("timestamp", tsType, false),
+                arrow::field("batch_id", arrow::utf8(), false),
+                arrow::field("service", arrow::utf8(), false),
+                arrow::field("cluster", arrow::utf8(), false),
+                arrow::field("record_id", arrow::utf8(), false),
+                arrow::field("level", arrow::int32(), true),
+                arrow::field("message", arrow::utf8(), true),
+                arrow::field("labels", arrow::utf8(), true),
+                arrow::field("meta", arrow::utf8(), true),
+            });
+            arrow::TimestampBuilder tsB(tsType, pool);
+            arrow::StringBuilder bidB(pool);
+            arrow::StringBuilder svcB(pool);
+            arrow::StringBuilder clB(pool);
+            arrow::StringBuilder idB(pool);
+            arrow::Int32Builder lvlB(pool);
+            arrow::StringBuilder msgB(pool);
+            arrow::StringBuilder labB(pool);
+            arrow::StringBuilder metaB(pool);
+            ArrowCheckStatus(tsB.Reserve(static_cast<int64_t>(n)), "tsB.Reserve");
+            ArrowCheckStatus(bidB.Reserve(static_cast<int64_t>(n)), "bidB.Reserve");
+            ArrowCheckStatus(svcB.Reserve(static_cast<int64_t>(n)), "svcB.Reserve");
+            ArrowCheckStatus(clB.Reserve(static_cast<int64_t>(n)), "clB.Reserve");
+            ArrowCheckStatus(idB.Reserve(static_cast<int64_t>(n)), "idB.Reserve");
+            ArrowCheckStatus(lvlB.Reserve(static_cast<int64_t>(n)), "lvlB.Reserve");
+            ArrowCheckStatus(msgB.Reserve(static_cast<int64_t>(n)), "msgB.Reserve");
+            ArrowCheckStatus(labB.Reserve(static_cast<int64_t>(n)), "labB.Reserve");
+            ArrowCheckStatus(metaB.Reserve(static_cast<int64_t>(n)), "metaB.Reserve");
+            for (size_t i = begin; i < end; ++i) {
+                const TOwnedLogRow& row = rows[i];
+                ArrowCheckStatus(tsB.Append(static_cast<int64_t>(row.Ts.MicroSeconds())), "tsB.Append");
+                appendUtf8(bidB, row.BatchId);
+                appendUtf8(svcB, row.Service);
+                appendUtf8(clB, Utf8Safe(row.Cluster));
+                appendUtf8(idB, row.RecordId);
+                ArrowCheckStatus(lvlB.Append(row.Level), "lvlB.Append");
+                appendUtf8(msgB, row.Message);
+                appendUtf8(labB, row.LabelsJson);
+                appendUtf8(metaB, row.MetaJson);
+            }
+            std::shared_ptr<arrow::Array> a0, a1, a2, a3, a4, a5, a6, a7, a8;
+            ArrowCheckStatus(tsB.Finish(&a0), "tsB.Finish");
+            ArrowCheckStatus(bidB.Finish(&a1), "bidB.Finish");
+            ArrowCheckStatus(svcB.Finish(&a2), "svcB.Finish");
+            ArrowCheckStatus(clB.Finish(&a3), "clB.Finish");
+            ArrowCheckStatus(idB.Finish(&a4), "idB.Finish");
+            ArrowCheckStatus(lvlB.Finish(&a5), "lvlB.Finish");
+            ArrowCheckStatus(msgB.Finish(&a6), "msgB.Finish");
+            ArrowCheckStatus(labB.Finish(&a7), "labB.Finish");
+            ArrowCheckStatus(metaB.Finish(&a8), "metaB.Finish");
+            columns = {std::move(a0), std::move(a1), std::move(a2), std::move(a3), std::move(a4), std::move(a5), std::move(a6), std::move(a7), std::move(a8)};
+            break;
+        }
+        case ELogsPkSchema::DedicatedBatchPartitioned: {
+            schema = std::make_shared<arrow::Schema>(std::vector<std::shared_ptr<arrow::Field>>{
+                arrow::field("timestamp", tsType, false),
+                arrow::field("batch_id", arrow::utf8(), false),
+                arrow::field("record_id", arrow::utf8(), false),
+                arrow::field("level", arrow::int32(), true),
+                arrow::field("message", arrow::utf8(), true),
+                arrow::field("labels", arrow::utf8(), true),
+                arrow::field("meta", arrow::utf8(), true),
+            });
+            arrow::TimestampBuilder tsB(tsType, pool);
+            arrow::StringBuilder bidB(pool);
+            arrow::StringBuilder idB(pool);
+            arrow::Int32Builder lvlB(pool);
+            arrow::StringBuilder msgB(pool);
+            arrow::StringBuilder labB(pool);
+            arrow::StringBuilder metaB(pool);
+            ArrowCheckStatus(tsB.Reserve(static_cast<int64_t>(n)), "tsB.Reserve");
+            ArrowCheckStatus(bidB.Reserve(static_cast<int64_t>(n)), "bidB.Reserve");
+            ArrowCheckStatus(idB.Reserve(static_cast<int64_t>(n)), "idB.Reserve");
+            ArrowCheckStatus(lvlB.Reserve(static_cast<int64_t>(n)), "lvlB.Reserve");
+            ArrowCheckStatus(msgB.Reserve(static_cast<int64_t>(n)), "msgB.Reserve");
+            ArrowCheckStatus(labB.Reserve(static_cast<int64_t>(n)), "labB.Reserve");
+            ArrowCheckStatus(metaB.Reserve(static_cast<int64_t>(n)), "metaB.Reserve");
+            for (size_t i = begin; i < end; ++i) {
+                const TOwnedLogRow& row = rows[i];
+                ArrowCheckStatus(tsB.Append(static_cast<int64_t>(row.Ts.MicroSeconds())), "tsB.Append");
+                appendUtf8(bidB, row.BatchId);
+                appendUtf8(idB, row.RecordId);
+                ArrowCheckStatus(lvlB.Append(row.Level), "lvlB.Append");
+                appendUtf8(msgB, row.Message);
+                appendUtf8(labB, row.LabelsJson);
+                appendUtf8(metaB, row.MetaJson);
+            }
+            std::shared_ptr<arrow::Array> a0, a1, a2, a3, a4, a5, a6;
+            ArrowCheckStatus(tsB.Finish(&a0), "tsB.Finish");
+            ArrowCheckStatus(bidB.Finish(&a1), "bidB.Finish");
+            ArrowCheckStatus(idB.Finish(&a2), "idB.Finish");
+            ArrowCheckStatus(lvlB.Finish(&a3), "lvlB.Finish");
+            ArrowCheckStatus(msgB.Finish(&a4), "msgB.Finish");
+            ArrowCheckStatus(labB.Finish(&a5), "labB.Finish");
+            ArrowCheckStatus(metaB.Finish(&a6), "metaB.Finish");
+            columns = {std::move(a0), std::move(a1), std::move(a2), std::move(a3), std::move(a4), std::move(a5), std::move(a6)};
+            break;
+        }
+        case ELogsPkSchema::PerServiceBatchPartitioned: {
+            schema = std::make_shared<arrow::Schema>(std::vector<std::shared_ptr<arrow::Field>>{
+                arrow::field("timestamp", tsType, false),
+                arrow::field("batch_id", arrow::utf8(), false),
+                arrow::field("cluster", arrow::utf8(), false),
+                arrow::field("record_id", arrow::utf8(), false),
+                arrow::field("level", arrow::int32(), true),
+                arrow::field("message", arrow::utf8(), true),
+                arrow::field("labels", arrow::utf8(), true),
+                arrow::field("meta", arrow::utf8(), true),
+            });
+            arrow::TimestampBuilder tsB(tsType, pool);
+            arrow::StringBuilder bidB(pool);
+            arrow::StringBuilder clB(pool);
+            arrow::StringBuilder idB(pool);
+            arrow::Int32Builder lvlB(pool);
+            arrow::StringBuilder msgB(pool);
+            arrow::StringBuilder labB(pool);
+            arrow::StringBuilder metaB(pool);
+            ArrowCheckStatus(tsB.Reserve(static_cast<int64_t>(n)), "tsB.Reserve");
+            ArrowCheckStatus(bidB.Reserve(static_cast<int64_t>(n)), "bidB.Reserve");
+            ArrowCheckStatus(clB.Reserve(static_cast<int64_t>(n)), "clB.Reserve");
+            ArrowCheckStatus(idB.Reserve(static_cast<int64_t>(n)), "idB.Reserve");
+            ArrowCheckStatus(lvlB.Reserve(static_cast<int64_t>(n)), "lvlB.Reserve");
+            ArrowCheckStatus(msgB.Reserve(static_cast<int64_t>(n)), "msgB.Reserve");
+            ArrowCheckStatus(labB.Reserve(static_cast<int64_t>(n)), "labB.Reserve");
+            ArrowCheckStatus(metaB.Reserve(static_cast<int64_t>(n)), "metaB.Reserve");
+            for (size_t i = begin; i < end; ++i) {
+                const TOwnedLogRow& row = rows[i];
+                ArrowCheckStatus(tsB.Append(static_cast<int64_t>(row.Ts.MicroSeconds())), "tsB.Append");
+                appendUtf8(bidB, row.BatchId);
+                appendUtf8(clB, Utf8Safe(row.Cluster));
+                appendUtf8(idB, row.RecordId);
+                ArrowCheckStatus(lvlB.Append(row.Level), "lvlB.Append");
+                appendUtf8(msgB, row.Message);
+                appendUtf8(labB, row.LabelsJson);
+                appendUtf8(metaB, row.MetaJson);
+            }
+            std::shared_ptr<arrow::Array> a0, a1, a2, a3, a4, a5, a6, a7;
+            ArrowCheckStatus(tsB.Finish(&a0), "tsB.Finish");
+            ArrowCheckStatus(bidB.Finish(&a1), "bidB.Finish");
+            ArrowCheckStatus(clB.Finish(&a2), "clB.Finish");
+            ArrowCheckStatus(idB.Finish(&a3), "idB.Finish");
+            ArrowCheckStatus(lvlB.Finish(&a4), "lvlB.Finish");
+            ArrowCheckStatus(msgB.Finish(&a5), "msgB.Finish");
+            ArrowCheckStatus(labB.Finish(&a6), "labB.Finish");
+            ArrowCheckStatus(metaB.Finish(&a7), "metaB.Finish");
+            columns = {std::move(a0), std::move(a1), std::move(a2), std::move(a3), std::move(a4), std::move(a5), std::move(a6), std::move(a7)};
+            break;
+        }
+        default: {
+            Y_ABORT_UNLESS(false, "unknown enum value");
         }
     }
 
@@ -1483,6 +1643,8 @@ void TOtelLogsServer::TImpl::ProcessExport(const ologs::ExportLogsServiceRequest
 
     THashMap<TBuck, TVector<TOwnedLogRow>, TBuckHash> buckets;
 
+    const TString batchId = CreateGuidAsString();
+
     for (const ResourceLogs& rl : request.resource_logs()) {
         const TProjectService ps = ExtractProjectService(rl.resource());
         if (hasFilter && !allowed.contains(ps.Project)) {
@@ -1490,24 +1652,25 @@ void TOtelLogsServer::TImpl::ProcessExport(const ologs::ExportLogsServiceRequest
         }
         const TResourceRowCtx resCtx = BuildResourceRowCtx(rl.resource(), ps, Cfg.IngestStreamingJsonSerializer);
 
-        const TRoutedTable route = ResolveLogsTable(Cfg, ps.Project, ps.Service, resCtx.Cluster, perProject);
-        if (route.Drop) {
-            continue;
-        }
-
-        const int partCount = (route.PkSchema == ELogsPkSchema::Dedicated) ? Cfg.PartitionCountDedicated : Cfg.PartitionCountCommon;
+        const auto routes = ResolveLogsTables(Cfg, ps.Project, ps.Service, resCtx.Cluster, perProject);
 
         for (const ScopeLogs& sl : rl.scope_logs()) {
             for (const LogRecord& lr : sl.log_records()) {
                 TOwnedLogRow row = MakeOwnedLogRow(resCtx, lr, Cfg.IngestStreamingJsonSerializer);
-                TBuck bk;
-                bk.Table = route.TablePath;
-                bk.Schema = route.PkSchema;
-                bk.Shard = 0;
-                if (Cfg.BatchByShardHash && partCount > 0) {
-                    bk.Shard = ShardIndexFromHash(HashOwnedLogRow(route.PkSchema, row), partCount);
+                for (const TRoutedTable& route : routes) {
+                    if (route.Drop) {
+                        continue;
+                    }
+                    const int partCount = (route.PkSchema == ELogsPkSchema::DedicatedBatchPartitioned || route.PkSchema == ELogsPkSchema::Dedicated) ? Cfg.PartitionCountDedicated : Cfg.PartitionCountCommon;
+                    TBuck bk;
+                    bk.Table = route.TablePath;
+                    bk.Schema = route.PkSchema;
+                    bk.Shard = 0;
+                    if (Cfg.BatchByShardHash && partCount > 0) {
+                        bk.Shard = ShardIndexFromHash(HashOwnedLogRow(route.PkSchema, row), partCount);
+                    }
+                    buckets[bk].push_back(row);
                 }
-                buckets[bk].push_back(std::move(row));
             }
         }
     }

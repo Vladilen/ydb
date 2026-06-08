@@ -49,6 +49,12 @@ otel_logs_to_ydb:
   ydb_common_logs_dir: "logs_store"
   ydb_dedicated_logs_dir: "logs"
 
+  ydb_common_logs_dir_batch_id: "logs2_store"
+  ydb_dedicated_logs_dir_batch_id: "logs2"
+
+  batch_id_services:
+    - processing
+
   batch_by_shard_hash: true
   # XOR: только одно из min_flush_records / min_flush_bytes (не оба).
   # Батч уходит в YDB при накоплении порога ИЛИ если не было успешной записи по шарду `flush_interval` секунд.
@@ -68,6 +74,15 @@ otel_logs_to_ydb:
       interval: "48h"
 
   logs_column_compression:
+    timestamp:
+      algorithm: zstd
+      level: 1
+    record_id:
+      algorithm: zstd
+      level: 1
+    batch_id:
+      algorithm: zstd
+      level: 1
     message:
       algorithm: zstd
       level: 4

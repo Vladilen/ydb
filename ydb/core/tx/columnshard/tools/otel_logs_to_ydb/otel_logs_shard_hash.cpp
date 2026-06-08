@@ -28,39 +28,41 @@ void AppendUtf8(XXH64_state_t* st, TStringBuf s) {
 
 } // namespace
 
-ui64 HashPartitionKey(ELogsPkSchema schema, TInstant ts, TStringBuf a, TStringBuf b, TStringBuf c) {
+ui64 HashOwnedLogRow(ELogsPkSchema schema, const TOwnedLogRow& row) {
     XXH64_state_t st;
     XXH64_reset(&st, 0);
     switch (schema) {
         case ELogsPkSchema::PerService:
-            AppendTs(&st, ts);
-            AppendUtf8(&st, a);
-            AppendUtf8(&st, b);
+            AppendTs(&st, row.Ts);
+            AppendUtf8(&st, row.Cluster);
+            AppendUtf8(&st, row.RecordId);
             break;
         case ELogsPkSchema::PerProjectHeap:
-            AppendTs(&st, ts);
-            AppendUtf8(&st, a);
-            AppendUtf8(&st, b);
-            AppendUtf8(&st, c);
+            AppendTs(&st, row.Ts);
+            AppendUtf8(&st, row.Service);
+            AppendUtf8(&st, row.Cluster);
+            AppendUtf8(&st, row.RecordId);
             break;
         case ELogsPkSchema::Dedicated:
-            AppendTs(&st, ts);
-            AppendUtf8(&st, a);
+            AppendTs(&st, row.Ts);
+            AppendUtf8(&st, row.RecordId);
             break;
+        case ELogsPkSchema::PerServiceBatchPartitioned:
+            AppendUtf8(&st, row.Cluster);
+            AppendUtf8(&st, row.BatchId);
+            break;
+        case ELogsPkSchema::PerProjectHeapBatchPartitioned:
+            AppendUtf8(&st, row.Service);
+            AppendUtf8(&st, row.Cluster);
+            AppendUtf8(&st, row.BatchId);
+            break;
+        case ELogsPkSchema::DedicatedBatchPartitioned:
+            AppendUtf8(&st, row.BatchId);
+            break;
+        default:
+            Y_ABORT_UNLESS(false, "unknown enum value");
     }
     return XXH64_digest(&st);
-}
-
-ui64 HashOwnedLogRow(ELogsPkSchema schema, const TOwnedLogRow& row) {
-    switch (schema) {
-        case ELogsPkSchema::PerService:
-            return HashPartitionKey(schema, row.Ts, row.Cluster, row.RecordId, TStringBuf{});
-        case ELogsPkSchema::PerProjectHeap:
-            return HashPartitionKey(schema, row.Ts, row.Service, row.Cluster, row.RecordId);
-        case ELogsPkSchema::Dedicated:
-            return HashPartitionKey(schema, row.Ts, row.RecordId, TStringBuf{}, TStringBuf{});
-    }
-    return 0;
 }
 
 int ShardIndexFromHash(ui64 h, int numShards) {

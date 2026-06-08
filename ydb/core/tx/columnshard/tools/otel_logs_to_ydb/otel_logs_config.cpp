@@ -86,6 +86,21 @@ TString NodeAsString(const YAML::Node& n, const std::string& def) {
     }
 }
 
+TString BuildColumnCompression(const YAML::Node& n, const TString& def) {
+    if (!n || !n.IsDefined()) {
+        return def;
+    }
+    const TString alg = NodeAsString(n["algorithm"]);
+    const int lvl = NodeAsInt(n["level"], -1);
+    if (alg.empty()) {
+        return def;
+    }
+    if (lvl >= 0) {
+        return TStringBuilder() << " COMPRESSION (algorithm = " << alg << ", level = " << lvl << ")";
+    }
+    return TStringBuilder() << " COMPRESSION (algorithm = " << alg << ")";
+}
+
 void ParseRouting(const YAML::Node& y, TServerConfig* cfg) {
     if (!y || !y.IsMap()) {
         return;
@@ -135,6 +150,19 @@ bool LoadOtelLogsYaml(const TString& path, TServerConfig* cfg, TString* errorMsg
         cfg->LogsDir = NodeAsString(n["logs_dir"], TString{cfg->LogsDir.data(), cfg->LogsDir.size()});
         cfg->YdbCommonLogsDir = NodeAsString(n["ydb_common_logs_dir"], TString{cfg->YdbCommonLogsDir.data(), cfg->YdbCommonLogsDir.size()});
         cfg->YdbDedicatedLogsDir = NodeAsString(n["ydb_dedicated_logs_dir"], TString{cfg->YdbDedicatedLogsDir.data(), cfg->YdbDedicatedLogsDir.size()});
+        cfg->YdbCommonLogsDirBatchId = NodeAsString(n["ydb_common_logs_dir_batch_id"], TString{cfg->YdbCommonLogsDirBatchId.data(), cfg->YdbCommonLogsDirBatchId.size()});
+        cfg->YdbDedicatedLogsDirBatchId = NodeAsString(n["ydb_dedicated_logs_dir_batch_id"], TString{cfg->YdbDedicatedLogsDirBatchId.data(), cfg->YdbDedicatedLogsDirBatchId.size()});
+        if (const YAML::Node bis = n["batch_id_services"]) {
+            if (bis.IsSequence()) {
+                cfg->BatchIdServices.clear();
+                for (const YAML::Node& e : bis) {
+                    const std::string svc = e.as<std::string>("");
+                    if (!svc.empty()) {
+                        cfg->BatchIdServices.push_back(svc);
+                    }
+                }
+            }
+        }
         cfg->TableLayout = NodeAsString(n["table_layout"], TString{cfg->TableLayout.data(), cfg->TableLayout.size()});
         cfg->WriteOnlyDedicated = NodeAsBool(n["write_only_dedicated"], cfg->WriteOnlyDedicated);
         cfg->BatchByShardHash = NodeAsBool(n["batch_by_shard_hash"], cfg->BatchByShardHash);
@@ -236,37 +264,12 @@ bool LoadOtelLogsYaml(const TString& path, TServerConfig* cfg, TString* errorMsg
             cfg->CompactionJson.assign(cj.data(), cj.size());
         }
         if (const YAML::Node lc = n["logs_column_compression"]) {
-            if (const YAML::Node m = lc["message"]) {
-                TString alg = NodeAsString(m["algorithm"]);
-                int lvl = NodeAsInt(m["level"], -1);
-                if (!alg.empty() && lvl >= 0) {
-                    const TString t = TStringBuilder() << " COMPRESSION (algorithm = " << alg << ", level = " << lvl << ")";
-                    cfg->LogsCompressionMessage.assign(t.data(), t.size());
-                } else if (!alg.empty()) {
-                    const TString t = TStringBuilder() << " COMPRESSION (algorithm = " << alg << ")";
-                    cfg->LogsCompressionMessage.assign(t.data(), t.size());
-                }
-            }
-            if (const YAML::Node m = lc["labels"]) {
-                TString alg = NodeAsString(m["algorithm"]);
-                int lvl = NodeAsInt(m["level"], -1);
-                if (!alg.empty() && lvl >= 0) {
-                    const TString t = TStringBuilder() << " COMPRESSION (algorithm = " << alg << ", level = " << lvl << ")";
-                    cfg->LogsCompressionLabels.assign(t.data(), t.size());
-                } else if (!alg.empty()) {
-                    const TString t = TStringBuilder() << " COMPRESSION (algorithm = " << alg << ")";
-                    cfg->LogsCompressionLabels.assign(t.data(), t.size());
-                }
-            }
-            if (const YAML::Node m = lc["meta"]) {
-                TString alg = NodeAsString(m["algorithm"]);
-                int lvl = NodeAsInt(m["level"], -1);
-                if (!alg.empty() && lvl >= 0) {
-                    const TString t = TStringBuilder() << " COMPRESSION (algorithm = " << alg << ", level = " << lvl << ")";
-                    cfg->LogsCompressionMeta.assign(t.data(), t.size());
-                } else if (!alg.empty()) {
-                    const TString t = TStringBuilder() << " COMPRESSION (algorithm = " << alg << ")";
-                    cfg->LogsCompressionMeta.assign(t.data(), t.size());
+            if (lc.IsMap()) {
+                for (const auto& kv : lc) {
+                    const std::string col = kv.first.as<std::string>();
+                    std::string val;
+                    const TString parsed = BuildColumnCompression(kv.second, TString{val.data(), val.size()});
+                    cfg->LogsColumnCompression[col].assign(parsed.data(), parsed.size());
                 }
             }
         }

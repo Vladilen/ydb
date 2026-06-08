@@ -77,13 +77,15 @@ void LogDdlBundle(
     const TString& tablePath,
     const TString& create,
     const TString& ttl,
-    const TString& compaction)
+    const TString& compaction,
+    const TString& subcolumns)
 {
     std::cerr << "Auto-DDL bundle (failed at " << failedStep << ") table=" << tablePath << ":\n"
               << "--- create ---\n"
               << create << "--- ttl ---\n"
               << ttl << "--- compaction ---\n"
-              << compaction << std::endl;
+              << compaction << "\n--- subcolumns ---\n"
+              << subcolumns << std::endl;
 }
 
 } // namespace
@@ -94,17 +96,26 @@ TDdlEnsurer::TDdlEnsurer(TServerConfig cfg)
 }
 
 TString TDdlEnsurer::BuildCreateDdl(const TString& tablePath, ELogsPkSchema schema) const {
-    const TStringBuf cm(Cfg_.LogsCompressionMessage.data(), Cfg_.LogsCompressionMessage.size());
-    const TStringBuf cl(Cfg_.LogsCompressionLabels.data(), Cfg_.LogsCompressionLabels.size());
-    const TStringBuf cz(Cfg_.LogsCompressionMeta.data(), Cfg_.LogsCompressionMeta.size());
-    const int pc = (schema == ELogsPkSchema::Dedicated) ? Cfg_.PartitionCountDedicated : Cfg_.PartitionCountCommon;
+    auto colComp = [&](const char* name) -> TStringBuf {
+        const auto it = Cfg_.LogsColumnCompression.find(name);
+        return it != Cfg_.LogsColumnCompression.end() ? TStringBuf{it->second.data(), it->second.size()} : TStringBuf{};
+    };
+    const TStringBuf ct = colComp("timestamp");
+    const TStringBuf cr = colComp("record_id");
+    const TStringBuf cm = colComp("message");
+    const TStringBuf cl = colComp("labels");
+    const TStringBuf cz = colComp("meta");
+    const TStringBuf cb = colComp("batch_id");
+    const bool isDedicated = (schema == ELogsPkSchema::DedicatedBatchPartitioned || schema == ELogsPkSchema::Dedicated);
+    const int pc = isDedicated ? Cfg_.PartitionCountDedicated : Cfg_.PartitionCountCommon;
     switch (schema) {
+        // Default schemas: no batch_id column.
         case ELogsPkSchema::PerProjectHeap:
             return TStringBuilder() << "CREATE TABLE `" << tablePath << "` (\n"
-                                     << "    timestamp Timestamp NOT NULL,\n"
+                                     << "    timestamp Timestamp NOT NULL" << ct << ",\n"
                                      << "    service Utf8 NOT NULL,\n"
                                      << "    cluster Utf8 NOT NULL,\n"
-                                     << "    record_id Utf8 NOT NULL,\n"
+                                     << "    record_id Utf8 NOT NULL" << cr << ",\n"
                                      << "    level Int32,\n"
                                      << "    message Utf8" << cm << ",\n"
                                      << "    labels JsonDocument" << cl << ",\n"
@@ -117,8 +128,8 @@ TString TDdlEnsurer::BuildCreateDdl(const TString& tablePath, ELogsPkSchema sche
                                      << ");\n";
         case ELogsPkSchema::Dedicated:
             return TStringBuilder() << "CREATE TABLE `" << tablePath << "` (\n"
-                                     << "    timestamp Timestamp NOT NULL,\n"
-                                     << "    record_id Utf8 NOT NULL,\n"
+                                     << "    timestamp Timestamp NOT NULL" << ct << ",\n"
+                                     << "    record_id Utf8 NOT NULL" << cr << ",\n"
                                      << "    level Int32,\n"
                                      << "    message Utf8" << cm << ",\n"
                                      << "    labels JsonDocument" << cl << ",\n"
@@ -129,17 +140,67 @@ TString TDdlEnsurer::BuildCreateDdl(const TString& tablePath, ELogsPkSchema sche
                                      << "    STORE = COLUMN,\n"
                                      << "    PARTITION_COUNT = " << pc << "\n"
                                      << ");\n";
-        default:
+        case ELogsPkSchema::PerService:
             return TStringBuilder() << "CREATE TABLE `" << tablePath << "` (\n"
-                                     << "    timestamp Timestamp NOT NULL,\n"
+                                     << "    timestamp Timestamp NOT NULL" << ct << ",\n"
                                      << "    cluster Utf8 NOT NULL,\n"
-                                     << "    record_id Utf8 NOT NULL,\n"
+                                     << "    record_id Utf8 NOT NULL" << cr << ",\n"
                                      << "    level Int32,\n"
                                      << "    message Utf8" << cm << ",\n"
                                      << "    labels JsonDocument" << cl << ",\n"
                                      << "    meta JsonDocument" << cz << ",\n"
                                      << "    PRIMARY KEY (timestamp, cluster, record_id)\n"
                                      << ") PARTITION BY HASH (timestamp, cluster, record_id)\n"
+                                     << "WITH (\n"
+                                     << "    STORE = COLUMN,\n"
+                                     << "    PARTITION_COUNT = " << pc << "\n"
+                                     << ");\n";
+        // BatchPartitioned schemas: batch_id column present.
+        case ELogsPkSchema::PerProjectHeapBatchPartitioned:
+            return TStringBuilder() << "CREATE TABLE `" << tablePath << "` (\n"
+                                     << "    timestamp Timestamp NOT NULL" << ct << ",\n"
+                                     << "    batch_id Utf8 NOT NULL" << cb << ",\n"
+                                     << "    service Utf8 NOT NULL,\n"
+                                     << "    cluster Utf8 NOT NULL,\n"
+                                     << "    record_id Utf8 NOT NULL" << cr << ",\n"
+                                     << "    level Int32,\n"
+                                     << "    message Utf8" << cm << ",\n"
+                                     << "    labels JsonDocument" << cl << ",\n"
+                                     << "    meta JsonDocument" << cz << ",\n"
+                                     << "    PRIMARY KEY (timestamp, service, cluster, batch_id, record_id)\n"
+                                     << ") PARTITION BY HASH (service, cluster, batch_id)\n"
+                                     << "WITH (\n"
+                                     << "    STORE = COLUMN,\n"
+                                     << "    PARTITION_COUNT = " << pc << "\n"
+                                     << ");\n";
+        case ELogsPkSchema::DedicatedBatchPartitioned:
+            return TStringBuilder() << "CREATE TABLE `" << tablePath << "` (\n"
+                                     << "    timestamp Timestamp NOT NULL" << ct << ",\n"
+                                     << "    batch_id Utf8 NOT NULL" << cb << ",\n"
+                                     << "    record_id Utf8 NOT NULL" << cr << ",\n"
+                                     << "    level Int32,\n"
+                                     << "    message Utf8" << cm << ",\n"
+                                     << "    labels JsonDocument" << cl << ",\n"
+                                     << "    meta JsonDocument" << cz << ",\n"
+                                     << "    PRIMARY KEY (timestamp, batch_id, record_id)\n"
+                                     << ") PARTITION BY HASH (batch_id)\n"
+                                     << "WITH (\n"
+                                     << "    STORE = COLUMN,\n"
+                                     << "    PARTITION_COUNT = " << pc << "\n"
+                                     << ");\n";
+        case ELogsPkSchema::PerServiceBatchPartitioned:
+        default:
+            return TStringBuilder() << "CREATE TABLE `" << tablePath << "` (\n"
+                                     << "    timestamp Timestamp NOT NULL" << ct << ",\n"
+                                     << "    batch_id Utf8 NOT NULL" << cb << ",\n"
+                                     << "    cluster Utf8 NOT NULL,\n"
+                                     << "    record_id Utf8 NOT NULL" << cr << ",\n"
+                                     << "    level Int32,\n"
+                                     << "    message Utf8" << cm << ",\n"
+                                     << "    labels JsonDocument" << cl << ",\n"
+                                     << "    meta JsonDocument" << cz << ",\n"
+                                     << "    PRIMARY KEY (timestamp, cluster, batch_id, record_id)\n"
+                                     << ") PARTITION BY HASH (cluster, batch_id)\n"
                                      << "WITH (\n"
                                      << "    STORE = COLUMN,\n"
                                      << "    PARTITION_COUNT = " << pc << "\n"
@@ -172,6 +233,22 @@ TString TDdlEnsurer::BuildCompactionDdl(const TString& tablePath) const {
                             << j << "`);";
 }
 
+TString TDdlEnsurer::BuildSubcolumnsDdl(const TString& tablePath) const {
+    auto alterColumn = [&tablePath](TStringBuf columnName) {
+        return TStringBuilder() << "ALTER OBJECT `" << tablePath
+                                << "` (TYPE TABLE) SET (ACTION=ALTER_COLUMN, NAME=" << columnName << ", "
+                                << "`DATA_EXTRACTOR_CLASS_NAME`=`JSON_SCANNER`, "
+                                << "`SCAN_FIRST_LEVEL_ONLY`=`false`, "
+                                << "`DATA_ACCESSOR_CONSTRUCTOR.CLASS_NAME`=`SUB_COLUMNS`, "
+                                << "`FORCE_SIMD_PARSING`=`false`, "
+                                << "`COLUMNS_LIMIT`=`1024`, "
+                                << "`SPARSED_DETECTOR_KFF`=`20`, "
+                                << "`MEM_LIMIT_CHUNK`=`52428800`, "
+                                << "`OTHERS_ALLOWED_FRACTION`=`0`);";
+    };
+    return TStringBuilder() << alterColumn("meta") << "\n" << alterColumn("labels");
+}
+
 bool TDdlEnsurer::ExecScheme(
     NYdb::NTable::TTableClient& client,
     TStringBuf step,
@@ -201,16 +278,32 @@ bool TDdlEnsurer::ExecScheme(
 
 bool TDdlEnsurer::EnsureLogsTable(NYdb::NTable::TTableClient& client, const TString& tablePath, ELogsPkSchema schema, TString* err) {
     const std::string key(tablePath.data(), tablePath.size());
+    std::shared_ptr<TEnsureState> state;
     {
         std::lock_guard<std::mutex> g(Mu_);
-        if (Ensured_.count(key)) {
+        if (Ensured_.contains(key)) {
+            return true;
+        }
+        std::shared_ptr<TEnsureState>& slot = EnsureStates_[key];
+        if (!slot) {
+            slot = std::make_shared<TEnsureState>();
+        }
+        state = slot;
+    }
+
+    std::lock_guard<std::mutex> tableLock(state->Mu);
+    {
+        std::lock_guard<std::mutex> g(Mu_);
+        if (Ensured_.contains(key)) {
             return true;
         }
     }
+
     TString e;
     const TString create = BuildCreateDdl(tablePath, schema);
     const TString ttl = BuildTtlDdl(tablePath);
     const TString compaction = BuildCompactionDdl(tablePath);
+    const TString subcolumns = BuildSubcolumnsDdl(tablePath);
     if (!ExecScheme(client, "create table", tablePath, create, &e)) {
         TStringBuf eb(e);
         const bool already = eb.Contains("AlreadyExists") || eb.Contains("already exists") || eb.Contains("ALREADY_EXISTS");
@@ -218,7 +311,7 @@ bool TDdlEnsurer::EnsureLogsTable(NYdb::NTable::TTableClient& client, const TStr
             if (err) {
                 *err = TStringBuilder() << "create table: " << e;
             }
-            LogDdlBundle("create table", tablePath, create, ttl, compaction);
+            LogDdlBundle("create table", tablePath, create, ttl, compaction, subcolumns);
             return false;
         }
     }
@@ -226,14 +319,21 @@ bool TDdlEnsurer::EnsureLogsTable(NYdb::NTable::TTableClient& client, const TStr
         if (err) {
             *err = TStringBuilder() << "set ttl: " << e;
         }
-        LogDdlBundle("set ttl", tablePath, create, ttl, compaction);
+        LogDdlBundle("set ttl", tablePath, create, ttl, compaction, subcolumns);
         return false;
     }
     if (!ExecScheme(client, "set compaction", tablePath, compaction, &e)) {
         if (err) {
             *err = TStringBuilder() << "set compaction: " << e;
         }
-        LogDdlBundle("set compaction", tablePath, create, ttl, compaction);
+        LogDdlBundle("set compaction", tablePath, create, ttl, compaction, subcolumns);
+        return false;
+    }
+    if (!ExecScheme(client, "set subcolumns", tablePath, subcolumns, &e)) {
+        if (err) {
+            *err = TStringBuilder() << "set subcolumns: " << e;
+        }
+        LogDdlBundle("set subcolumns", tablePath, create, ttl, compaction, subcolumns);
         return false;
     }
     std::lock_guard<std::mutex> g(Mu_);

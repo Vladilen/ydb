@@ -5,7 +5,9 @@
 
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/table/table.h>
 
+#include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace NColumnShard::NOtelLogsToYdb {
@@ -22,6 +24,7 @@ private:
     TString BuildCreateDdl(const TString& tablePath, ELogsPkSchema schema) const;
     TString BuildTtlDdl(const TString& tablePath) const;
     TString BuildCompactionDdl(const TString& tablePath) const;
+    TString BuildSubcolumnsDdl(const TString& tablePath) const;
 
     bool ExecScheme(
         NYdb::NTable::TTableClient& client,
@@ -30,9 +33,14 @@ private:
         const TString& yql,
         TString* err);
 
+    struct TEnsureState {
+        std::mutex Mu;
+    };
+
     TServerConfig Cfg_;
     std::mutex Mu_;
     std::unordered_set<std::string> Ensured_;
+    std::unordered_map<std::string, std::shared_ptr<TEnsureState>> EnsureStates_;
 };
 
 } // namespace NColumnShard::NOtelLogsToYdb
