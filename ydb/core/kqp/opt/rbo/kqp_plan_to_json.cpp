@@ -1,11 +1,15 @@
 #include "kqp_operator.h"
+
 #include <ydb/library/yql/dq/actors/protos/dq_stats.pb.h>
+
+#include <yql/essentials/utils/log/log.h>
+
 #include <library/cpp/json/writer/json.h>
 #include <library/cpp/json/json_reader.h>
 
-namespace {
+namespace NKikimr::NKqp {
 
-using namespace NKikimr::NKqp;
+namespace {
 
 void AddOptimizerEstimates(NJson::TJsonValue& json, const TIntrusivePtr<IOperator>& op) {
     json["E-Rows"] = TStringBuilder() << op->Props.Statistics->ERows;
@@ -213,6 +217,7 @@ void AddStatsToSimplifiedPlan(NJson::TJsonValue& txPlan) {
 
     // Extract all operator ids from SimplifiedPlan and look up stages and operators
     // in the execution plan
+    // FIXME: This tries to look up by connections, let's not find the connections as operators in the first place
     std::vector<NJson::TJsonValue> opIds;
     FindPlanNodes(simplifiedPlan, "OperatorId", opIds);
 
@@ -224,8 +229,14 @@ void AddStatsToSimplifiedPlan(NJson::TJsonValue& txPlan) {
         NJson::TJsonValue* explainPlanStage;
         NJson::TJsonValue* explainPlanOp;
 
-        Y_ENSURE(FindStageAndOpByOpId(execPlan, idNode.GetIntegerSafe(), execPlanStage, execPlanOp, execOperatorIdx));
-        Y_ENSURE(FindStageAndOpByOpId(simplifiedPlan, idNode.GetIntegerSafe(), explainPlanStage, explainPlanOp, explainOperatorIdx));
+        if (!FindStageAndOpByOpId(execPlan, idNode.GetIntegerSafe(), execPlanStage, execPlanOp, execOperatorIdx)) {
+            YQL_CLOG(TRACE, CoreDq) << "Did not find operator: " << idNode.GetIntegerSafe() << " in exec plan";
+            continue;
+        }
+        if (!FindStageAndOpByOpId(simplifiedPlan, idNode.GetIntegerSafe(), explainPlanStage, explainPlanOp, explainOperatorIdx)) {
+            YQL_CLOG(TRACE, CoreDq) << "Did not find operator: " << idNode.GetIntegerSafe() << " in simplified plan";
+
+        }
 
         if(!execPlanStage->GetMapSafe().contains("Stats")) {
             continue;
@@ -326,10 +337,7 @@ void AddStatsToSimplifiedPlan(NJson::TJsonValue& txPlan) {
     ComputeCpuTimes(simplifiedPlan);
 }
 
-}
-
-namespace NKikimr {
-namespace NKqp {
+} // anonymous namespace
 
 NJson::TJsonValue TOpRoot::GetExecutionJson(ui64& nodeCounter, THashMap<IOperator*, ui32>& operatorIds, ui32 explainFlags) {
     Y_UNUSED(explainFlags);
@@ -503,5 +511,4 @@ TString SerializeRBOAnalyzePlan(const TVector<const TString>& txPlans, const NKq
     return SerializeRBOExplainPlan(txPlanJson);
 }
 
-}
-}
+} // namespace NKikimr::NKqp

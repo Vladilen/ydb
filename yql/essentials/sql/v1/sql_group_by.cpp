@@ -1,6 +1,8 @@
 #include "sql_group_by.h"
 #include "sql_expression.h"
 #include "source.h"
+
+#include <yql/essentials/core/langver/feature.gen.h>
 #include <yql/essentials/minikql/mkql_type_ops.h>
 
 namespace NSQLTranslationV1 {
@@ -39,9 +41,7 @@ bool TGroupByClause::Build(const TRule_group_by_clause& node) {
             return false;
         }
 
-        if (!Ctx_.EnsureBackwardCompatibleFeatureAvailable(
-                Ctx_.Pos(), "GROUP BY MODE", NYql::GetMaxLangVersion()))
-        {
+        if (!Ctx_.EnsureAvailable(Ctx_.Pos(), NYql::NFeature::AggPhases)) {
             return false;
         }
 
@@ -266,7 +266,7 @@ bool TGroupByClause::GroupingElement(const TRule_grouping_element& node, EGroupB
                         FeedCollection(elem, collection, hasEmpty);
                     }
                 } else {
-                    TVector<TNodePtr> elemList(1, std::move(elem));
+                    TVector<TNodePtr> elemList(1, elem);
                     collection.push_back(BuildListOfNamedNodes(Ctx_.Pos(), std::move(elemList)));
                 }
             }

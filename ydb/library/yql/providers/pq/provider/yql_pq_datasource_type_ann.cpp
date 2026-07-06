@@ -369,7 +369,7 @@ public:
     }
 
     TStatus HandleDqTopicSource(const TExprNode::TPtr& input, TExprContext& ctx) {
-        if (!EnsureMinMaxArgsCount(*input, 7, 9, ctx)) {
+        if (!EnsureMinMaxArgsCount(*input, 10, 12, ctx)) {
             return TStatus::Error;
         }
 
@@ -377,6 +377,9 @@ public:
         const auto topic = input->Child(TDqPqTopicSource::idx_Topic);
         const auto settings = input->Child(TDqPqTopicSource::idx_Settings);
         const auto rowType = input->Child(TDqPqTopicSource::idx_RowType);
+        const auto partitions = input->Child(TDqPqTopicSource::idx_Partitions);
+        const auto offsetPredicate = input->Child(TDqPqTopicSource::idx_OffsetPredicate);
+        const auto writeTimePredicate = input->Child(TDqPqTopicSource::idx_WriteTimePredicate);
 
         if (!EnsureWorldType(*world, ctx)) {
             return TStatus::Error;
@@ -481,6 +484,11 @@ public:
                 return TStatus::Error;
             }
             const TString metadataSysColumnName(metadataSysColumn->Content());
+            if (State_->ForbidYqlSysColumnsAndSystemMetadata && SkipPqSystemPrefix(metadataSysColumnName)) {
+                ctx.AddError(TIssue(ctx.GetPosition(metadataField->Pos()), TStringBuilder()
+                    << "_yql_sys_ columns are not allowed, use __ydb_-prefixed columns instead"));
+                return TStatus::Error;
+            }
             const auto descriptor = GetPqMetaFieldDescriptorBySysColumn(
                 metadataSysColumnName,
                 State_->EnableUserAttributesInTopicQuery);
@@ -490,6 +498,20 @@ public:
                 return TStatus::Error;
             }
             items.emplace_back(BuildPqMetaFieldExprType(*descriptor, ctx));
+        }
+
+        if (!partitions->IsCallable(TCoVoid::CallableName())) {
+            if (!EnsureListType(*partitions, ctx)) {
+                return TStatus::Error;
+            }
+        }
+
+        if (!EnsureAtom(*offsetPredicate, ctx)) {
+            return TStatus::Error;
+        }
+
+        if (!EnsureAtom(*writeTimePredicate, ctx)) {
+            return TStatus::Error;
         }
 
         input->SetTypeAnn(ctx.MakeType<TStreamExprType>(ctx.MakeType<TTupleExprType>(items)));
@@ -508,6 +530,13 @@ public:
 
         auto rowSchema = rowSpec->GetTypeAnn()->Cast<TTypeExprType>()->GetType()->Cast<TStructExprType>();
         for (const auto& rowSchemaItem : rowSchema->GetItems()) {
+            const TString columnName(rowSchemaItem->GetName());
+            if (SkipYdbSystemPrefix(columnName)) {
+                ctx.AddError(TIssue(ctx.GetPosition(rowSpec->Pos()), TStringBuilder()
+                    << "Schema column name '" << columnName
+                    << "' is not allowed: names starting with '__ydb_' are reserved for system columns"));
+                return TStatus::Error;
+            }
             items.push_back(rowSchemaItem);
         }
 
@@ -522,6 +551,11 @@ public:
                 return TStatus::Error;
             }
             const TString metadataSysColumnName(metadataSysColumn->Content());
+            if (State_->ForbidYqlSysColumnsAndSystemMetadata && SkipPqSystemPrefix(metadataSysColumnName)) {
+                ctx.AddError(TIssue(ctx.GetPosition(metadataField->Pos()), TStringBuilder()
+                    << "_yql_sys_ columns are not allowed, use __ydb_-prefixed columns instead"));
+                return TStatus::Error;
+            }
             const auto descriptor = GetPqMetaFieldDescriptorBySysColumn(
                 metadataSysColumnName,
                 State_->EnableUserAttributesInTopicQuery);
@@ -538,6 +572,12 @@ public:
     }
 
     TStatus HandleMetadata(const TExprNode::TPtr& input, TExprNode::TPtr& output, TExprContext& ctx) {
+        if (State_->ForbidYqlSysColumnsAndSystemMetadata) {
+            ctx.AddError(TIssue(ctx.GetPosition(input->Pos()),
+                "SystemMetadata is not allowed, use __ydb_-prefixed columns instead"));
+            return TStatus::Error;
+        }
+
         const auto key = input->ChildPtr(0);
         if (!EnsureCallable(*key, ctx)) {
             return TStatus::Error;

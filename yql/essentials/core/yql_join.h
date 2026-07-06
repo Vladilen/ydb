@@ -162,6 +162,8 @@ struct TEquiJoinLinkSettings {
     bool ForceSortedMerge = false;
     bool Compact = false;
     TVector<TString> JoinAlgoOptions;
+    // Left join side is enforced to be star join center if flag is set
+    bool ForceStar = false;
 
     TVector<NDq::TJoinColumn> ShuffleLhsBy;
     TVector<NDq::TJoinColumn> ShuffleRhsBy;
@@ -204,4 +206,8 @@ static constexpr TStringBuf YqlCanaryColumnName = "_yql_canary_";
 static constexpr TStringBuf YqlJoinKeyColumnName = "_yql_join_key";
 
 bool IsNoPullColumn(TStringBuf columnName);
+
+static constexpr TStringBuf YqlListJoinCoreKeyPrefix = "_yql_ljc_key_";
+static constexpr TStringBuf YqlListJoinCoreLeftInputPrefix = "_yql_ljc_left_";
+static constexpr TStringBuf YqlListJoinCoreRightInputPrefix = "_yql_ljc_right_";
 }

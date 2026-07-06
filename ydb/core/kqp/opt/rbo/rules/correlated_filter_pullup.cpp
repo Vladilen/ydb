@@ -66,12 +66,19 @@ bool TPullUpCorrelatedFilterRule::MatchAndApply(TIntrusivePtr<IOperator> &input,
 
     if (input->Kind == EOperator::Map) {
         auto map = CastOperator<TOpMap>(input);
+        const auto newMapInputIUs = remainingFilter->GetOutputIUs();
+
+        for (const auto& mapEl : map->MapElements) {
+            if (!mapEl.DependsOnlyOn(newMapInputIUs)) {
+                return false;
+            }
+        }
 
         // Stop if we compute something from one of the dependent columns, except for Just
         for (const auto & mapEl : map->MapElements) {
             for (const auto & iu : mapEl.GetExpression().GetInputIUs(false, true)) {
                 if (correlated.contains(iu)) {
-                    if (!mapEl.IsRename() && !mapEl.GetExpression().IsSingleCallable({"Just"})) {
+                    if (!mapEl.IsColumnAccess() && !mapEl.GetExpression().IsSingleCallable({"Just"})) {
                         return false;
                     }
                 }
@@ -88,8 +95,7 @@ bool TPullUpCorrelatedFilterRule::MatchAndApply(TIntrusivePtr<IOperator> &input,
             }
         }
 
-        // First we add needed columns to the map, if its a projection map
-        if (!addToMap.empty() && map->Project) {
+        if (!addToMap.empty()) {
             for (const auto & add : addToMap) {
                 map->MapElements.push_back(TMapElement(add, add, map->Pos, &ctx.ExprCtx, &props));
             }

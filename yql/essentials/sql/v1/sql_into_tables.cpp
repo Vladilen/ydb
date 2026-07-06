@@ -1,6 +1,8 @@
 #include "sql_into_tables.h"
 #include "sql_values.h"
 
+#include <yql/essentials/core/langver/feature.gen.h>
+
 #include <util/string/join.h>
 
 using namespace NYql;
@@ -104,7 +106,7 @@ TNodePtr TSqlIntoTable::Build(const TRule_into_table_stmt& node) {
 
         const bool result = !hasAt
                                 ? ClusterExprOrBinding(clusterExpr, service, cluster, isBinding)
-                                : ClusterExpr(clusterExpr, false, service, cluster);
+                                : ClusterExpr(clusterExpr, /*allowWildcard=*/false, service, cluster);
 
         if (!result) {
             return nullptr;
@@ -245,9 +247,7 @@ bool TSqlIntoTable::ValidateServiceName(const TRule_into_table_stmt& node, const
 
     if (isMapReduce) {
         if (mode == ESQLWriteColumnMode::ReplaceInto) {
-            if (!Ctx_.EnsureBackwardCompatibleFeatureAvailable(
-                    pos, "REPLACE", MakeLangVersion(2025, 4)))
-            {
+            if (!Ctx_.EnsureAvailable(pos, NYql::NFeature::ReplaceInto)) {
                 return false;
             }
         }

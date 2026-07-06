@@ -1,8 +1,8 @@
-#include "dq_channel_service.h"
 #include "dq_tasks_counters.h"
 #include "dq_tasks_runner.h"
 
 #include <ydb/library/yql/dq/runtime/streaming/dq_compute_actor_watermarks.h>
+#include <ydb/library/yql/dq/runtime/streaming/dq_watermark_generator_tracker.h>
 #include <ydb/library/yql/dq/actors/spilling/spilling_counters.h>
 #include <ydb/library/yql/dq/comp_nodes/dq_watermark_generator.h>
 #include <yql/essentials/minikql/comp_nodes/mkql_multihopping.h>
@@ -28,6 +28,7 @@
 #include <yql/essentials/minikql/mkql_node_visitor.h>
 #include <yql/essentials/minikql/mkql_program_builder.h>
 #include <yql/essentials/minikql/mkql_watermark.h>
+#include <yql/essentials/minikql/runtime_settings/runtime_settings_serialization.h>
 #include <yql/essentials/providers/common/schema/mkql/yql_mkql_schema.h>
 
 #include <util/generic/scope.h>
@@ -355,7 +356,7 @@ public:
             } else if (callable.GetType()->GetName() == "MultiHoppingCore") {
                 return WrapMultiHoppingCore(callable, ctx, Watermark);
             } else if (callable.GetType()->GetName() == "DqWatermarkGenerator") {
-                return WrapDqWatermarkGenerator(callable, ctx, Watermark);
+                return WrapDqWatermarkGenerator(callable, ctx, Watermark, SourceWatermarksTracker);
             }
             return nullptr;
         };
@@ -369,10 +370,13 @@ public:
             optLLVM = "OFF";
         }
 
+
+        Y_ENSURE(RuntimeSettings, "RuntimeSettings must be set in Prepare stage of TDqTaskRunner");
+
         TComputationPatternOpts opts(alloc.Ref(), typeEnv, taskRunnerFactory,
             Context.FuncRegistry, NUdf::EValidateMode::None, validatePolicy, optLLVM, EGraphPerProcess::Multi,
             AllocatedHolder->ProgramParsed.StatsRegistry.Get(), CollectFull() ? &CountersProvider : nullptr, nullptr,
-            ComputationLogProvider.Get(), task.GetProgram().GetLangVer());
+            ComputationLogProvider.Get(), task.GetProgram().GetLangVer(), RuntimeSettings);
 
         if (!SecureParamsProvider) {
             SecureParamsProvider = MakeSimpleSecureParamsProvider(Settings.SecureParams);
@@ -503,19 +507,21 @@ public:
         bool canBeCached;
         if (UseSeparatePatternAlloc(task) && Context.PatternCache) {
             auto& cache = Context.PatternCache;
-            auto future = cache->FindOrSubscribe(program.GetRaw());
+            Y_ENSURE(RuntimeSettings, "RuntimeSettings must be set in Prepare stage of TDqTaskRunner");
+            TProgramKey cacheKey{program.GetLangVer(), StableHashRuntimeSettings(*RuntimeSettings), program.GetRaw()};
+            auto future = cache->FindOrSubscribe(cacheKey);
             if (!future.HasValue()) {
                 try {
                     entry = CreateComputationPattern(task, program.GetRaw(), true, canBeCached);
                     if (canBeCached && entry->Pattern->GetSuitableForCache()) {
-                        cache->EmplacePattern(task.GetProgram().GetRaw(), entry);
+                        cache->EmplacePattern(cacheKey, entry);
                     } else {
                         cache->IncNotSuitablePattern();
-                        cache->NotifyPatternMissing(program.GetRaw());
+                        cache->NotifyPatternMissing(cacheKey);
                     }
                 } catch (...) {
                     // TODO: not sure if there may be exceptions in the first place.
-                    cache->NotifyPatternMissing(program.GetRaw());
+                    cache->NotifyPatternMissing(cacheKey);
                     throw;
                 }
             } else {
@@ -576,12 +582,16 @@ public:
 
     void Prepare(const TDqTaskSettings& task, const TDqTaskRunnerMemoryLimits& memoryLimits,
         const IDqTaskRunnerExecutionContext& execCtx,
-        TDqComputeActorWatermarks* watermarksTracker) override
-    {
+        TDqComputeActorWatermarks* watermarksTracker,
+        TDqWatermarkGeneratorTracker* sourceWatermarksTracker
+    ) override {
         WatermarksTracker = watermarksTracker;
+        SourceWatermarksTracker = sourceWatermarksTracker;
         TaskId = task.GetId();
         StageId = task.GetStageId();
         LangVer = task.GetProgram().GetLangVer();
+        RuntimeSettings = DeserializeRuntimeSettingsFromProto(task.GetProgram().GetRuntimeSettings());
+
         auto entry = BuildTask(task);
 
         LOG(TStringBuilder() << "Prepare task: " << TaskId);
@@ -669,6 +679,7 @@ public:
                         .Level = StatsModeToCollectStatsLevel(Settings.StatsMode),
                         .TransportVersion = inputChannelDesc.GetTransportVersion(),
                         .PackerVersion = FromProto(task.GetValuePackerVersion()),
+                        .DatumValidationMode = RuntimeSettings->DatumValidation.Get(),
                         .MaxStoredBytes = memoryLimits.ChannelBufferSize,
                         .ChannelQuotaManager = memoryLimits.ChannelQuotaManager,
                     };
@@ -828,6 +839,7 @@ public:
                         .Level = StatsModeToCollectStatsLevel(Settings.StatsMode),
                         .TransportVersion = outputChannelDesc.GetTransportVersion(),
                         .PackerVersion = FromProto(task.GetValuePackerVersion()),
+                        .DatumValidationMode = RuntimeSettings->DatumValidation.Get(),
                         .MaxStoredBytes = memoryLimits.ChannelBufferSize,
                         .ChannelQuotaManager = memoryLimits.ChannelQuotaManager,
                         .MaxChunkBytes = memoryLimits.OutputChunkMaxSize,
@@ -1223,6 +1235,8 @@ private:
     std::unique_ptr<NUdf::ISecureParamsProvider> SecureParamsProvider;
     TDqTaskCountersProvider CountersProvider;
     TLangVersion LangVer = MinLangVersion;
+    TRuntimeSettings::TConstPtr RuntimeSettings;
+
     ui64 InputsConsumed = 0;
 
     struct TInputTransformInfo {
@@ -1277,6 +1291,7 @@ private:
     std::optional<TAllocatedHolder> AllocatedHolder;
     NKikimr::NMiniKQL::TWatermark Watermark;
     TDqComputeActorWatermarks* WatermarksTracker = nullptr;
+    TDqWatermarkGeneratorTracker* SourceWatermarksTracker = nullptr;
 
     bool TaskHasEffects = false;
 

@@ -40,11 +40,20 @@ UNDEFINED_SANITIZER_IGNORE_STRINGS = [
 ]
 
 FEATURES = json.loads(resource.find('yql/essentials/data/language/features.json'))
+LANGVER = json.loads(resource.find('yql/essentials/data/language/langver.json'))
 
 
 def get_param(name, default=None):
     name = 'YQL_' + name.upper()
     return yatest.common.get_param(name, os.environ.get(name) or default)
+
+
+def get_secure_params(cfg):
+    return {
+        item[1]: item[2]
+        for item in cfg
+        if len(item) == 3 and item[0] == 'secure_param'
+    }
 
 
 def do_custom_query_check(res, sql_query):
@@ -202,9 +211,32 @@ def new_table(full_name, file_path=None, yqlrun_file=None, content=None, res_dir
             content = b''
             exists = False
         else:
+            def _read_splitted(path):
+                """Return concatenated part-file bytes if path has a splitted attr, else None."""
+                attr_path = path + '.attr'
+                if not os.path.exists(attr_path):
+                    return None
+                with open(attr_path, 'rb') as attr_f:
+                    attr_bytes = attr_f.read()
+                if not attr_bytes:
+                    return None
+                num_parts = cyson.loads(attr_bytes).get(b'splitted')
+                if num_parts is None:
+                    return None
+                parts = []
+                for i in range(int(num_parts)):
+                    with open(path + '.part.{}'.format(i), 'rb') as f:
+                        parts.append(f.read())
+                return b''.join(parts)
+
             if os.path.exists(src_file):
                 with open(src_file, 'rb') as f:
                     content = f.read()
+                # Main file may be empty when data is in .part.N files (FMR splitted output).
+                if not content:
+                    splitted = _read_splitted(src_file)
+                    if splitted is not None:
+                        content = splitted
             elif src_file_alternative and os.path.exists(src_file_alternative):
                 with open(src_file_alternative, 'rb') as f:
                     content = f.read()
@@ -537,15 +569,22 @@ def is_xfail(cfg, filename=''):
 
 
 def get_langver(cfg):
+    def decode(langver):
+        if langver == 'max':
+            return LANGVER['max']
+        if langver == 'unknown':
+            return None
+        return langver
+
     def resolve(alias):
         if alias in FEATURES:
-            return FEATURES[alias]["since_langver"]
+            return FEATURES[alias]["min_langver"]
         if alias[0].isdigit():
             return alias
         raise ValueError('Bad alias ' + alias)
 
     return next((
-        resolve(item[1])
+        decode(resolve(item[1]))
         for item in cfg
         if item[0] == 'langver'
     ), None)

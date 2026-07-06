@@ -1,4 +1,5 @@
 #include <ydb/public/api/protos/ydb_export.pb.h>
+#include <ydb/public/api/protos/ydb_import.pb.h>
 #include <ydb/public/api/protos/ydb_topic.pb.h>
 
 #include <ydb/core/backup/common/encryption.h>
@@ -12,10 +13,11 @@
 #include <ydb/core/tx/datashard/datashard.h>
 #include <ydb/core/tx/schemeshard/schemeshard_billing_helpers.h>
 #include <ydb/core/tx/schemeshard/ut_helpers/helpers.h>
+#include <ydb/core/tx/schemeshard/ut_helpers/local_indexes.h>
 #include <ydb/core/tx/schemeshard/ut_helpers/ut_backup_restore_common.h>
-#include <ydb/core/util/aws.h>
 #include <ydb/core/wrappers/s3_wrapper.h>
 #include <ydb/core/wrappers/ut_helpers/s3_mock.h>
+#include <ydb/library/aws_init/aws.h>
 
 #include <library/cpp/testing/hook/hook.h>
 
@@ -319,8 +321,12 @@ namespace {
             return {};
         }
 
-        ui64 ExportWithRetryInjection(ui64 txId, const TString& compression = "", ui64 minWriteBatchSize = 1) {
+        ui64 ExportWithRetryInjection(ui64 txId, const TString& compression = "", const TString& encryptionBlock = "", ui64 minWriteBatchSize = 1) {
             Runtime().SetLogPriority(NKikimrServices::DATASHARD_BACKUP, NActors::NLog::PRI_DEBUG);
+
+            if (encryptionBlock) {
+                Runtime().GetAppData().FeatureFlags.SetEnableEncryptedExport(true);
+            }
 
             THolder<IEventHandle> injectResult;
             auto prevObserver = Runtime().SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
@@ -369,6 +375,11 @@ namespace {
                 compressionLine = Sprintf(R"(compression: "%s")", compression.c_str());
             }
 
+            TString extraSettings;
+            if (compressionLine || encryptionBlock) {
+                extraSettings = compressionLine + "\n" + encryptionBlock;
+            }
+
             const auto exportId = ++txId;
             TestExport(Runtime(), exportId, "/MyRoot", Sprintf(R"(
                 ExportToS3Settings {
@@ -381,7 +392,7 @@ namespace {
                   }
                   %s
                 }
-            )", S3Port(), compressionLine.c_str()));
+            )", S3Port(), extraSettings.c_str()));
 
             if (!injectResult) {
                 TDispatchOptions opts;
@@ -1093,6 +1104,66 @@ namespace {
             return *TestEnv;
         }
 
+        void ExportImportStandaloneColumnTableWithLocalBloomIndexes(bool enableLocalIndexAsSchemeObject) {
+            Env();
+            Runtime().GetAppData().FeatureFlags.SetEnableColumnTablesBackup(true);
+            Runtime().GetAppData().FeatureFlags.SetEnableLocalIndexAsSchemeObject(enableLocalIndexAsSchemeObject);
+
+            ui64 txId = 100;
+
+            TestCreateColumnTable(Runtime(), ++txId, "/MyRoot",
+                NLocalIndexes::OlapTableWithBloomAndNgramIndexes("OlapBloomTable"));
+            Env().TestWaitNotification(Runtime(), txId);
+
+            auto assertBloomIndexes = [this](const TString& path) {
+                const auto d = DescribePrivatePath(Runtime(), path, true, true);
+                UNIT_ASSERT_C(d.GetPathDescription().HasColumnTableDescription(), "expected column table at " << path);
+                const auto& schema = d.GetPathDescription().GetColumnTableDescription().GetSchema();
+                THashSet<TString> found;
+                for (const auto& ix : schema.GetIndexes()) {
+                    found.insert(ix.GetName());
+                }
+
+                UNIT_ASSERT_C(found.contains("idx_bloom"), "missing idx_bloom on " << path);
+                UNIT_ASSERT_C(found.contains("idx_ngram"), "missing idx_ngram on " << path);
+            };
+
+            assertBloomIndexes("/MyRoot/OlapBloomTable");
+
+            const ui64 exportTxId = ++txId;
+            TestExport(Runtime(), exportTxId, "/MyRoot", Sprintf(R"(
+            ExportToS3Settings {
+              endpoint: "localhost:%d"
+              scheme: HTTP
+              items {
+                source_path: "/MyRoot/OlapBloomTable"
+                destination_prefix: "OlapBloomExport"
+              }
+            }
+        )", S3Port()));
+            Env().TestWaitNotification(Runtime(), exportTxId);
+            TestGetExport(Runtime(), exportTxId, "/MyRoot", Ydb::StatusIds::SUCCESS);
+
+            const ui64 importId = ++txId;
+            TestImport(Runtime(), importId, "/MyRoot", Sprintf(R"(
+            ImportFromS3Settings {
+              endpoint: "localhost:%d"
+              scheme: HTTP
+              items {
+                source_prefix: "OlapBloomExport"
+                destination_path: "/MyRoot/OlapBloomImported"
+              }
+            }
+        )", S3Port()));
+            Env().TestWaitNotification(Runtime(), importId);
+            TestGetImport(Runtime(), importId, "/MyRoot", Ydb::StatusIds::SUCCESS);
+
+            assertBloomIndexes("/MyRoot/OlapBloomImported");
+
+            TestForgetExport(Runtime(), ++txId, "/MyRoot", exportTxId);
+            Env().TestWaitNotification(Runtime(), exportTxId);
+        }
+
     private:
         TPortManager PortManager;
         ui16 S3ServerPort = 0;
@@ -1753,22 +1824,20 @@ partitioning_settings {
         )", S3Port()));
 
         Runtime().WaitFor("put object request from 01 partition", [&]{ return blockPartition01.size() >= 1; });
-        bool isCompleted = false;
 
-        while (!isCompleted) {
+        bool found = false;
+        for (int attempt = 0; attempt < 100 && !found; ++attempt) {
+            Runtime().SimulateSleep(TDuration::MilliSeconds(100));
             const auto desc = TestGetExport(Runtime(), txId, "/MyRoot");
-            const auto entry = desc.GetResponse().GetEntry();
-            const auto& item = entry.GetItemsProgress(0);
-
+            const auto& item = desc.GetResponse().GetEntry().GetItemsProgress(0);
             if (item.parts_completed() > 0) {
-                isCompleted = true;
+                found = true;
                 UNIT_ASSERT_VALUES_EQUAL(item.parts_total(), 2);
                 UNIT_ASSERT_VALUES_EQUAL(item.parts_completed(), 1);
                 UNIT_ASSERT(item.has_start_time());
-            } else {
-                Runtime().SimulateSleep(TDuration::Seconds(1));
             }
         }
+        UNIT_ASSERT_C(found, "partition 00 export didn't complete in time");
 
         blockPartition01.Stop();
         blockPartition01.Unblock();
@@ -1972,6 +2041,109 @@ partitioning_settings {
         }
     }
 
+    Y_UNIT_TEST(ShouldRetryCopyTablesProposeAfterConcurrentResolved) {
+        Env();
+        ui64 txId = 100;
+
+        TestCreateTable(Runtime(), ++txId, "/MyRoot", R"(
+            Name: "Table"
+            Columns { Name: "key" Type: "Utf8" }
+            Columns { Name: "value" Type: "Utf8" }
+            KeyColumnNames: ["key"]
+        )");
+        Env().TestWaitNotification(Runtime(), txId);
+
+        ui64 copyTablesTxIdA = 0;
+        ui64 copyTablesTxIdB = 0;
+        TVector<THolder<IEventHandle>> heldSchemaChanged;
+        THolder<IEventHandle> heldBMultipleMods;
+
+        auto origObserver = Runtime().SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
+            switch (ev->GetTypeRewrite()) {
+            case TEvSchemeShard::EvModifySchemeTransaction: {
+                const auto& record = ev->Get<TEvSchemeShard::TEvModifySchemeTransaction>()->Record;
+                if (record.TransactionSize() > 0
+                    && record.GetTransaction(0).GetOperationType()
+                        == NKikimrSchemeOp::ESchemeOpCreateConsistentCopyTables)
+                {
+                    if (copyTablesTxIdA == 0) {
+                        copyTablesTxIdA = record.GetTxId();
+                    } else if (copyTablesTxIdB == 0 && record.GetTxId() != copyTablesTxIdA) {
+                        copyTablesTxIdB = record.GetTxId();
+                    }
+                }
+                break;
+            }
+            case TEvDataShard::EvSchemaChanged: {
+                const auto& record = ev->Get<TEvDataShard::TEvSchemaChanged>()->Record;
+                if (copyTablesTxIdA != 0 && record.GetTxId() == copyTablesTxIdA) {
+                    heldSchemaChanged.emplace_back(ev.Release());
+                    return TTestActorRuntime::EEventAction::DROP;
+                }
+                break;
+            }
+            case TEvSchemeShard::EvModifySchemeTransactionResult: {
+                const auto& record = ev->Get<TEvSchemeShard::TEvModifySchemeTransactionResult>()->Record;
+                if (copyTablesTxIdB != 0 && record.GetTxId() == copyTablesTxIdB
+                    && record.GetStatus() == NKikimrScheme::StatusMultipleModifications
+                    && !heldBMultipleMods)
+                {
+                    heldBMultipleMods.Reset(ev.Release());
+                    return TTestActorRuntime::EEventAction::DROP;
+                }
+                break;
+            }
+            default:
+                break;
+            }
+            return TTestActorRuntime::EEventAction::PROCESS;
+        });
+
+        const auto exportA = ++txId;
+        TestExport(Runtime(), exportA, "/MyRoot", Sprintf(R"(
+            ExportToS3Settings {
+              endpoint: "localhost:%d"
+              scheme: HTTP
+              items {
+                source_path: "/MyRoot/Table"
+                destination_prefix: "A"
+              }
+            }
+        )", S3Port()));
+
+        Runtime().WaitFor("A's SchemaChanged held",
+            [&] { return !heldSchemaChanged.empty(); });
+
+        const auto exportB = ++txId;
+        TestExport(Runtime(), exportB, "/MyRoot", Sprintf(R"(
+            ExportToS3Settings {
+              endpoint: "localhost:%d"
+              scheme: HTTP
+              items {
+                source_path: "/MyRoot/Table"
+                destination_prefix: "B"
+              }
+            }
+        )", S3Port()));
+
+        Runtime().WaitFor("B's MultipleMods response held",
+            [&] { return bool(heldBMultipleMods); });
+
+        Runtime().SetObserverFunc(origObserver);
+
+        for (auto& ev : heldSchemaChanged) {
+            Runtime().Send(ev.Release(), 0, true);
+        }
+        heldSchemaChanged.clear();
+        Env().TestWaitNotification(Runtime(), exportA);
+        TestGetExport(Runtime(), exportA, "/MyRoot", Ydb::StatusIds::SUCCESS);
+
+        Runtime().Send(heldBMultipleMods.Release(), 0, true);
+
+        Env().TestWaitNotification(Runtime(), exportB);
+        TestGetExport(Runtime(), exportB, "/MyRoot", Ydb::StatusIds::SUCCESS);
+    }
+
     Y_UNIT_TEST(ShouldSucceedOnConcurrentImport) {
         Env(); // Init test env
         ui64 txId = 100;
@@ -2064,16 +2236,23 @@ partitioning_settings {
         TestGetExport(Runtime(), exportId, "/MyRoot");
     }
 
-    Y_UNIT_TEST(ExportImportStandaloneColumnTableWithLocalBloomIndexes) {
+    Y_UNIT_TEST(ExportImportStandaloneColumnTableWithLocalBloomIndexes_EnableLocalIndexAsSchemeObject_false) {
+        ExportImportStandaloneColumnTableWithLocalBloomIndexes(false);
+    }
+
+    Y_UNIT_TEST(ExportImportStandaloneColumnTableWithLocalBloomIndexes_EnableLocalIndexAsSchemeObject_true) {
+        ExportImportStandaloneColumnTableWithLocalBloomIndexes(true);
+    }
+
+    Y_UNIT_TEST(ExportImportStandaloneColumnTableWithLocalMinMaxIndexes) {
         Env();
         Runtime().GetAppData().FeatureFlags.SetEnableColumnTablesBackup(true);
-        Runtime().GetAppData().FeatureFlags.SetEnableLocalBloomFilterIndex(true);
-        Runtime().GetAppData().FeatureFlags.SetEnableLocalBloomNgramFilterIndex(true);
+        Runtime().GetAppData().FeatureFlags.SetEnableLocalMinMaxIndex(true);
 
         ui64 txId = 100;
 
         TestCreateColumnTable(Runtime(), ++txId, "/MyRoot", R"(
-            Name: "OlapBloomTable"
+            Name: "OlapMinMaxTable"
             ColumnShardCount: 1
             Schema {
                 Columns { Name: "timestamp" Type: "Timestamp" NotNull: true }
@@ -2083,21 +2262,9 @@ partitioning_settings {
                 KeyColumnNames: "uid"
                 Indexes {
                     Id: 1
-                    Name: "idx_bloom"
-                    ClassName: "BLOOM_FILTER"
-                    BloomFilter {
-                        FalsePositiveProbability: 0.01
-                        ColumnIds: 2
-                    }
-                }
-                Indexes {
-                    Id: 2
-                    Name: "idx_ngram"
-                    ClassName: "BLOOM_NGRAMM_FILTER"
-                    BloomNGrammFilter {
-                        NGrammSize: 3
-                        FalsePositiveProbability: 0.01
-                        CaseSensitive: true
+                    Name: "idx_minmax"
+                    ClassName: "MIN_MAX"
+                    MinMaxIndex {
                         ColumnId: 2
                     }
                 }
@@ -2105,7 +2272,7 @@ partitioning_settings {
         )");
         Env().TestWaitNotification(Runtime(), txId);
 
-        auto assertBloomIndexes = [this](const TString& path) {
+        auto assertMinMaxIndexes = [this](const TString& path) {
             const auto d = DescribePrivatePath(Runtime(), path, true, true);
             UNIT_ASSERT_C(d.GetPathDescription().HasColumnTableDescription(), "expected column table at " << path);
             const auto& schema = d.GetPathDescription().GetColumnTableDescription().GetSchema();
@@ -2113,12 +2280,10 @@ partitioning_settings {
             for (const auto& ix : schema.GetIndexes()) {
                 found.insert(ix.GetName());
             }
-
-            UNIT_ASSERT_C(found.contains("idx_bloom"), "missing idx_bloom on " << path);
-            UNIT_ASSERT_C(found.contains("idx_ngram"), "missing idx_ngram on " << path);
+            UNIT_ASSERT_C(found.contains("idx_minmax"), "missing idx_minmax on " << path);
         };
 
-        assertBloomIndexes("/MyRoot/OlapBloomTable");
+        assertMinMaxIndexes("/MyRoot/OlapMinMaxTable");
 
         const ui64 exportTxId = ++txId;
         TestExport(Runtime(), exportTxId, "/MyRoot", Sprintf(R"(
@@ -2126,8 +2291,8 @@ partitioning_settings {
               endpoint: "localhost:%d"
               scheme: HTTP
               items {
-                source_path: "/MyRoot/OlapBloomTable"
-                destination_prefix: "OlapBloomExport"
+                source_path: "/MyRoot/OlapMinMaxTable"
+                destination_prefix: "OlapMinMaxExport"
               }
             }
         )", S3Port()));
@@ -2140,15 +2305,15 @@ partitioning_settings {
               endpoint: "localhost:%d"
               scheme: HTTP
               items {
-                source_prefix: "OlapBloomExport"
-                destination_path: "/MyRoot/OlapBloomImported"
+                source_prefix: "OlapMinMaxExport"
+                destination_path: "/MyRoot/OlapMinMaxImported"
               }
             }
         )", S3Port()));
         Env().TestWaitNotification(Runtime(), importId);
         TestGetImport(Runtime(), importId, "/MyRoot", Ydb::StatusIds::SUCCESS);
 
-        assertBloomIndexes("/MyRoot/OlapBloomImported");
+        assertMinMaxIndexes("/MyRoot/OlapMinMaxImported");
 
         TestForgetExport(Runtime(), ++txId, "/MyRoot", exportTxId);
         Env().TestWaitNotification(Runtime(), exportTxId);
@@ -3603,6 +3768,7 @@ state: STATE_ENABLED
               Columns { Name: "embedding" Type: "String" }
               Columns { Name: "prefix" Type: "String" }
               Columns { Name: "value" Type: "Utf8" }
+              Columns { Name: "json" Type: "Json" }
               KeyColumnNames: ["key"]
             }
             %s
@@ -3635,6 +3801,33 @@ state: STATE_ENABLED
 
         for (const auto implTable : NTableIndex::GetImplTables(indexType, indexColumns)) {
             UNIT_ASSERT(s3Mock.GetData().FindPtr(TStringBuilder() << "/index/" << implTable << "/scheme.pb"));
+        }
+
+        // Round-trip: import back and verify impl tables exist on the imported table.
+        TestImport(runtime, ++txId, "/MyRoot", Sprintf(R"(
+            ImportFromS3Settings {
+              endpoint: "localhost:%d"
+              scheme: HTTP
+              items {
+                source_prefix: ""
+                destination_path: "/MyRoot/TableImported"
+              }
+              index_population_mode: INDEX_POPULATION_MODE_IMPORT
+            }
+        )", s3Port));
+        env.TestWaitNotification(runtime, txId);
+        TestGetImport(runtime, txId, "/MyRoot", Ydb::StatusIds::SUCCESS);
+
+        const TString importedIndexPath = "/MyRoot/TableImported/index";
+        TestDescribeResult(DescribePrivatePath(runtime, importedIndexPath), {
+            NLs::PathExist,
+            NLs::IndexType(indexType),
+            NLs::IndexState(NKikimrSchemeOp::EIndexState::EIndexStateReady),
+        });
+        for (const auto& implTable : NTableIndex::GetImplTables(indexType, indexColumns)) {
+            TestDescribeResult(
+                DescribePrivatePath(runtime, TStringBuilder() << importedIndexPath << "/" << implTable),
+                {NLs::PathExist, NLs::IsTable});
         }
     }
 
@@ -3764,6 +3957,17 @@ state: STATE_ENABLED
                   }
                 }
               }
+            }
+        )");
+    }
+
+    Y_UNIT_TEST(IndexMaterializationGlobalJson) {
+        EnvOptions().EnableIndexMaterialization(true);
+        IndexMaterialization(Env(), Runtime(), S3Mock(), S3Port(), true, R"(
+            IndexDescription {
+              Name: "index"
+              KeyColumnNames: ["json"]
+              Type: EIndexTypeGlobalJson
             }
         )");
     }
@@ -4542,5 +4746,48 @@ CREATE EXTERNAL TABLE IF NOT EXISTS `ExternalTable` (
         Env().TestWaitNotification(Runtime(), importId);
 
         TestGetImport(Runtime(), importId, "/MyRoot", Ydb::StatusIds::SUCCESS);
+    }
+
+    Y_UNIT_TEST(ShouldNotCorruptEncryptedBufferOnRetry) {
+        Env();
+        Runtime().GetAppData().FeatureFlags.SetEnableEncryptedExport(true);
+        Runtime().SetLogPriority(NKikimrServices::DATASHARD_BACKUP, NActors::NLog::PRI_DEBUG);
+        ui64 txId = 100;
+
+        TestCreateTable(Runtime(), ++txId, "/MyRoot", R"(
+            Name: "Table"
+            Columns { Name: "key" Type: "Uint32" }
+            Columns { Name: "value" Type: "Utf8" }
+            KeyColumnNames: ["key"]
+        )");
+        Env().TestWaitNotification(Runtime(), txId);
+
+        UpdateRow(Runtime(), "Table", 1, "valueA");
+        UpdateRow(Runtime(), "Table", 2, "valueB");
+
+        txId = ExportWithRetryInjection(txId, "",
+        R"(
+            destination_prefix: "export1"
+              encryption_settings {
+                encryption_algorithm: "AES-128-GCM"
+                symmetric_key {
+                    key: "0123456789012345"
+                }
+              }
+        )");
+
+        const auto* data = S3Mock().GetData().FindPtr("/export1/001/data_00.csv.enc");
+        UNIT_ASSERT(data);
+
+        TBuffer decryptedData;
+        NBackup::TEncryptionIV iv;
+        UNIT_ASSERT_NO_EXCEPTION(std::tie(decryptedData, iv) = NBackup::TEncryptedFileDeserializer::DecryptFullFile(
+            NBackup::TEncryptionKey("0123456789012345"),
+            TBuffer(data->data(), data->size())
+        ));
+
+        const TString expected = "1,\"valueA\"\n2,\"valueB\"\n";
+        const TString decrypted(decryptedData.Data(), decryptedData.Size());
+        UNIT_ASSERT_VALUES_EQUAL_C(decrypted, expected, "Encrypted buffer corruption detected");
     }
 }

@@ -24,7 +24,7 @@ IGraphTransformer::TStatus MultiUsageFlatMapOverJoin(const TExprNode::TPtr& node
     for (auto parent : it->second) {
         if (auto maybeFlatMap = TMaybeNode<TCoFlatMapBase>(parent)) {
             auto flatMap = maybeFlatMap.Cast();
-            auto newParent = FlatMapOverEquiJoin(flatMap, ctx, *optCtx.ParentsMap, true, optCtx.Types);
+            auto newParent = FlatMapOverEquiJoin(flatMap, ctx, *optCtx.ParentsMap, /*multiUsage=*/true, optCtx.Types);
             if (!newParent.Raw()) {
                 return IGraphTransformer::TStatus::Error;
             }
@@ -593,9 +593,6 @@ void RegisterCoFinalizers(TFinalizingOptimizerMap& map) {
     map[TCoPartitionByKey::CallableName()] = map[TCoPartitionsByKeys::CallableName()] =
         [](const TExprNode::TPtr& node, TNodeOnNodeOwnedMap& toOptimize, TExprContext& ctx, TOptimizeContext& optCtx)
     {
-        if (node->IsCallable(TCoPartitionsByKeys::CallableName()) && !CanApplyExtractMembersToPartitionsByKeys(optCtx.Types)) {
-            return true;
-        }
         OptimizeSubsetFieldsForNodeWithMultiUsage(node, *optCtx.ParentsMap, toOptimize, ctx,
             [] (const TExprNode::TPtr& input, const TExprNode::TPtr& members, const TParentsMap&, TExprContext& ctx) {
                 return ApplyExtractMembersToPartitionByKey(input, members, ctx, " with multi-usage");

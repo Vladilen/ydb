@@ -32,6 +32,7 @@
 
 #include <ydb/core/base/appdata.h>
 #include <ydb/core/base/hive.h>
+#include <ydb/core/base/table_index.h>
 #include <ydb/core/base/tablet_pipecache.h>
 #include <ydb/core/control/lib/immediate_control_board_impl.h>
 #include <ydb/core/protos/memory_controller_config.pb.h>
@@ -4302,8 +4303,8 @@ bool TExecutor::CompactTables() {
     }
 }
 
-void TExecutor::StartVacuum(ui64 vacuumGeneration) {
-    if (VacuumLogic->TryStartVacuum(vacuumGeneration, OwnerCtx())) {
+void TExecutor::StartVacuum(TVacuumTag tag) {
+    if (VacuumLogic->TryStartVacuum(tag, OwnerCtx())) {
         for (const auto& [tableId, _] : Scheme().Tables) {
             auto compactionId = CompactionLogic->PrepareForceCompaction(tableId);
             VacuumLogic->OnCompactionPrepared(tableId, compactionId);
@@ -4933,6 +4934,28 @@ ui64 TExecutor::BeginCompaction(THolder<NTable::TCompactionParams> params)
     comp->Layout.Groups.resize(rowScheme->Families.size());
     comp->Writer.Groups.resize(rowScheme->Families.size());
 
+    // Detect fulltext compact tables
+    if (tableInfo->SpecialTableType == NKikimrSchemeOp::ESpecialTableType::ESpecialTableTypeFulltextCompact ||
+        tableInfo->SpecialTableType == NKikimrSchemeOp::ESpecialTableType::ESpecialTableTypeFulltextCompactRelevance) {
+        comp->IsFulltextCompact = true;
+        comp->FulltextWithRelevance = (tableInfo->SpecialTableType == NKikimrSchemeOp::ESpecialTableType::ESpecialTableTypeFulltextCompactRelevance);
+        // Resolve column tags by name from tableInfo->Columns
+        for (const auto& [id, col] : tableInfo->Columns) {
+            if (col.Name == NTableIndex::NFulltext::AddedColumn) {
+                comp->FulltextAddedTag = id;
+            } else if (col.Name == NTableIndex::NFulltext::SegmentColumn) {
+                comp->FulltextSegmentTag = id;
+            }
+        }
+        // Determine if key type is signed from the last key column (__ydb_max_id)
+        if (tableInfo->KeyColumns.size() >= 3) {
+            auto maxIdColId = tableInfo->KeyColumns.back();
+            auto keyTypeId = tableInfo->Columns.at(maxIdColId).PType.GetTypeId();
+            comp->FulltextKeySigned = (keyTypeId == NScheme::NTypeIds::Int64 || keyTypeId == NScheme::NTypeIds::Int32);
+            comp->FulltextKeySize = (keyTypeId == NScheme::NTypeIds::Int64 || keyTypeId == NScheme::NTypeIds::Uint64 ? 8 : 4);
+        }
+    }
+
     auto addChannel = [&](ui8 channel) {
         auto group = Owner->Info()->GroupFor(channel, Generation());
 
@@ -5321,6 +5344,23 @@ void TExecutor::Handle(NBackup::TEvChangelogStats::TPtr& ev) {
     Counters->Simple()[TExecutorCounters::BACKUP_CHANGELOG_INFLIGHT_BYTES].Sub(ev->Get()->BytesWritten);
     Counters->Percentile()[TExecutorCounters::TX_PERCENTILE_BACKUP_CHANGELOG_FLUSH_LATENCY].IncrementFor(msg->Latency.MicroSeconds());
     Counters->Percentile()[TExecutorCounters::TX_PERCENTILE_BACKUP_CHANGELOG_LAG].IncrementFor(msg->Lag.MicroSeconds());
+}
+
+void TExecutor::MoveData(TEvTablet::TEvMoveData::TPtr& ev) {
+    if (!Stats->IsFollower()) {
+        MoveDataSubscribers.insert(ev->Sender);
+        StartVacuum(TNoTag());
+    }
+}
+
+void TExecutor::VacuumComplete(TVacuumGeneration generation, const TActorContext& ctx) {
+    if (generation) {
+        Owner->VacuumComplete(generation, ctx);
+    }
+    for (const auto& actor : MoveDataSubscribers) {
+        ctx.Send(actor, new TEvTablet::TEvMoveDataResponse(TabletId()));
+    }
+    MoveDataSubscribers.clear();
 }
 
 }

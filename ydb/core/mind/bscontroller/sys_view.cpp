@@ -47,7 +47,7 @@ void FillKey(NKikimrSysView::TStoragePoolKey* key, const TBoxStoragePoolId& id) 
 }
 
 void CalculateGroupUsageStats(NKikimrSysView::TGroupInfo *info, const std::vector<TGroupDiskInfo>& disks,
-        TBlobStorageGroupType type) {
+        TBlobStorageGroupType type, ui32 groupSizeInUnits) {
     if (disks.empty()) {
         return;
     }
@@ -67,6 +67,7 @@ void CalculateGroupUsageStats(NKikimrSysView::TGroupInfo *info, const std::vecto
             slotSize = pdiskMetrics.GetTotalSize() / disk.ExpectedSlotCount;
         }
 
+        slotSize *= TPDiskConfig::GetOwnerWeight(groupSizeInUnits, pdiskMetrics.GetSlotSizeInUnits());
         if (slotSize) {
             totalSize = Min(totalSize ? totalSize : Max<ui64>(), slotSize);
         }
@@ -92,6 +93,7 @@ class TSystemViewsCollector : public TActorBootstrapped<TSystemViewsCollector> {
 
     std::vector<NKikimrSysView::TStorageStatsEntry> StorageStats;
     TActorId StorageStatsCalculatorId;
+    bool InitialCalculation = true;
     static constexpr TDuration StorageStatsUpdatePeriod = TDuration::Minutes(10);
 
 public:
@@ -109,7 +111,6 @@ public:
 
     void Bootstrap(const TActorContext&) {
         Become(&TThis::StateWork);
-        RunStorageStatsCalculator();
     }
 
     STRICT_STFUNC(StateWork,
@@ -134,6 +135,16 @@ public:
         HostRecords = std::move(msg->HostRecords);
         GroupReserveMin = msg->GroupReserveMin;
         GroupReservePart = msg->GroupReservePart;
+
+        if (InitialCalculation) {
+            if (State && HostRecords) {
+                // First time we receive complete BSC state, we need to run storage stats calculator.
+                // We do it here to avoid running it before we have all the data.
+                // Consecutive runs will be scheduled by TEvCalculateStorageStatsRequest event.
+                InitialCalculation = false;
+                RunStorageStatsCalculator();
+            }
+        }
     }
 
     void PassAway() override {
@@ -340,7 +351,7 @@ void CopyInfo(NKikimrSysView::TPDiskInfo* info, const THolder<TBlobStorageContro
 
 void SerializeVSlotInfo(NKikimrSysView::TVSlotInfo *pb, const TVDiskID& vdiskId, const NKikimrBlobStorage::TVDiskMetrics& m,
         std::optional<NKikimrBlobStorage::EVDiskStatus> status, NKikimrBlobStorage::TVDiskKind::EVDiskKind kind,
-        bool isBeingDeleted)
+        bool isBeingDeleted, bool phantomOnly)
 {
     pb->SetGroupId(vdiskId.GroupID.GetRawId());
     pb->SetGroupGeneration(vdiskId.GroupGeneration);
@@ -375,12 +386,13 @@ void SerializeVSlotInfo(NKikimrSysView::TVSlotInfo *pb, const TVDiskID& vdiskId,
     if (isBeingDeleted) {
         pb->SetIsBeingDeleted(true);
     }
+    pb->SetPhantomOnly(phantomOnly);
 }
 
 void CopyInfo(NKikimrSysView::TVSlotInfo* info, const THolder<TBlobStorageController::TVSlotInfo>& vSlotInfo,
         const TBlobStorageController::TGroupInfo::TGroupFinder& /*finder*/, const TBridgeInfo* /*bridgeInfo*/) {
     SerializeVSlotInfo(info, vSlotInfo->GetVDiskId(), vSlotInfo->Metrics, vSlotInfo->VDiskStatus,
-        vSlotInfo->Kind, vSlotInfo->IsBeingDeleted());
+        vSlotInfo->Kind, vSlotInfo->IsBeingDeleted(), vSlotInfo->IsReplicatingWithPhantomsOnly());
 }
 
 void CopyInfo(NKikimrSysView::TGroupInfo* info, const THolder<TBlobStorageController::TGroupInfo>& groupInfo,
@@ -400,7 +412,7 @@ void CopyInfo(NKikimrSysView::TGroupInfo* info, const THolder<TBlobStorageContro
     for (const auto& vslot : groupInfo->VDisksInGroup) {
         disks.push_back({&vslot->PDisk->Metrics, &vslot->Metrics, vslot->PDisk->ExpectedSlotCount});
     }
-    CalculateGroupUsageStats(info, disks, TBlobStorageGroupType(groupInfo->ErasureSpecies));
+    CalculateGroupUsageStats(info, disks, TBlobStorageGroupType(groupInfo->ErasureSpecies), groupInfo->GroupSizeInUnits);
 
     info->SetSeenOperational(groupInfo->SeenOperational);
     const auto& latencyStats = groupInfo->LatencyStats;
@@ -473,12 +485,14 @@ void TBlobStorageController::UpdateSystemViews() {
     for (auto& [key, value] : VSlots) {
         if (!value->VDiskStatus && value->VDiskStatusTimestamp + expiration <= now) {
             value->VDiskStatus = NKikimrBlobStorage::ERROR;
+            value->OnlyPhantomsRemain = false;
             SysViewChangedVSlots.insert(key);
         }
     }
     for (auto& [key, value] : StaticVSlots) {
         if (!value.VDiskStatus && value.VDiskStatusTimestamp + expiration <= now) {
             value.VDiskStatus = NKikimrBlobStorage::ERROR;
+            value.OnlyPhantomsRemain = false;
             SysViewChangedVSlots.insert(key);
         }
         if (SysViewChangedPDisks.contains(key.ComprisingPDiskId())) { // PDisk under static VSlot has been changed
@@ -572,7 +586,7 @@ void TBlobStorageController::UpdateSystemViews() {
             if (SysViewChangedVSlots.count(vslotId)) {
                 static const NKikimrBlobStorage::TVDiskMetrics zero;
                 SerializeVSlotInfo(&state.VSlots[vslotId], vslot.VDiskId, vslot.VDiskMetrics ? *vslot.VDiskMetrics : zero,
-                    vslot.VDiskStatus, vslot.VDiskKind, false);
+                    vslot.VDiskStatus, vslot.VDiskKind, false, vslot.IsReplicatingWithPhantomsOnly());
             }
         }
         TStaticGroupInfo::TStaticGroupFinder staticFinder = [this](TGroupId groupId) {
@@ -611,7 +625,7 @@ void TBlobStorageController::UpdateSystemViews() {
                     }
                     pdiskIds.emplace_back(nodeId, pdiskId);
                 }
-                CalculateGroupUsageStats(pb, disks, info->Type.GetErasure());
+                CalculateGroupUsageStats(pb, disks, info->Type.GetErasure(), info->GroupSizeInUnits);
 
                 pb->SetLayoutCorrect(group.IsLayoutCorrect(staticFinder));
 

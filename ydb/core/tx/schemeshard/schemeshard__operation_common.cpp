@@ -8,6 +8,7 @@
 #include <ydb/core/kesus/tablet/events.h>
 #include <ydb/core/mind/hive/hive.h>
 #include <ydb/core/persqueue/events/global.h>
+#include <ydb/core/test_tablet/events.h>
 #include <ydb/core/tx/columnshard/columnshard.h>
 #include <ydb/core/tx/datashard/datashard.h>
 #include <ydb/core/tx/replication/controller/public_events.h>
@@ -260,6 +261,9 @@ bool TCreateParts::HandleReply(TEvHive::TEvCreateTabletReply::TPtr& ev, TOperati
             break;
         case ETabletType::BackupController:
             context.SS->TabletCounters->Simple()[COUNTER_BACKUP_CONTROLLER_TABLET_COUNT].Add(1);
+            break;
+        case ETabletType::TestShard:
+            context.SS->TabletCounters->Simple()[COUNTER_TEST_SHARD_COUNT].Add(1);
             break;
         default:
             break;
@@ -1241,7 +1245,45 @@ void ValidateNoTransactionOnPaths(TOperationId operationId, const THashSet<TPath
     }
 }
 
+void AbortRelatedOperations(TOperationId operationId, const THashSet<TTxId>& relatedTx, TOperationContext& context, TStringBuf logPrefix) {
+    const TTabletId ssId = context.SS->SelfTabletId();
+
+    for (auto otherTxId: relatedTx) {
+        if (otherTxId == operationId.GetTxId()) {
+            continue;
+        }
+
+        LOG_NOTICE_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                     logPrefix
+                         << ", dependent transaction: " << operationId.GetTxId()
+                         << ", parent transaction: " << otherTxId
+                         << ", at schemeshard: " << ssId);
+
+        context.OnComplete.Dependence(otherTxId, operationId.GetTxId());
+
+        Y_ABORT_UNLESS(context.SS->Operations.contains(otherTxId));
+        auto otherOperation = context.SS->Operations.at(otherTxId);
+        // AbortUnsafe marks parts as done; clear active barriers first to avoid
+        // IsDoneBarrier() VERIFY when a blocked part is force-aborted.
+        otherOperation->ForceClearBarriers();
+        for (ui32 partId = 0; partId < otherOperation->Parts.size(); ++partId) {
+            if (auto part = otherOperation->Parts.at(partId)) {
+                part->AbortUnsafe(operationId.GetTxId(), context);
+            }
+        }
+    }
+}
+
 }  // namespace NForceDrop
+
+void RegisterParentPathDependencies(const TOperationId& operationId, const TOperationContext& context, const TPath& parentPath) {
+    if (parentPath.Base()->HasActiveChanges()) {
+        const TTxId parentTxId = parentPath.Base()->PlannedToCreate()
+                                    ? parentPath.Base()->CreateTxId
+                                    : parentPath.Base()->LastTxId;
+        context.OnComplete.Dependence(parentTxId, operationId.GetTxId());
+    }
+}
 
 void IncParentDirAlterVersionWithRepublishSafeWithUndo(const TOperationId& opId, const TPath& path, TSchemeShard* ss, TSideEffects& onComplete) {
     auto parent = path.Parent();
@@ -1340,6 +1382,19 @@ NKikimrSchemeOp::TModifyScheme MoveTableIndexTask(NKikimr::NSchemeShard::TPath& 
     auto operation = scheme.MutableMoveTableIndex();
     operation->SetSrcPath(src.PathString());
     operation->SetDstPath(dst.PathString());
+
+    return scheme;
+}
+
+NKikimrSchemeOp::TModifyScheme MoveLocalIndexTask(const TString& tablePath, const TString& srcIndexPath, const TString& dstIndexName) {
+    NKikimrSchemeOp::TModifyScheme scheme;
+
+    scheme.SetWorkingDir(tablePath);
+    scheme.SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpMoveIndex);
+    auto operation = scheme.MutableMoveIndex();
+    operation->SetTablePath(tablePath);
+    operation->SetSrcPath(srcIndexPath);
+    operation->SetDstPath(dstIndexName);
 
     return scheme;
 }

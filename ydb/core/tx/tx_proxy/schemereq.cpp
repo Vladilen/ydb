@@ -461,6 +461,10 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
         case NKikimrSchemeOp::ESchemeOpCreateLongIncrementalBackupOp:
             return *modifyScheme.MutableBackupIncrementalBackupCollection()->MutableName();
 
+        case NKikimrSchemeOp::ESchemeOpCreateFullBackupOp:
+            // The aggregator has no sub-name; WorkingDir is the collection path.
+            return *modifyScheme.MutableWorkingDir();
+
         case NKikimrSchemeOp::ESchemeOpRestoreBackupCollection:
             return *modifyScheme.MutableRestoreBackupCollection()->MutableName();
 
@@ -497,6 +501,12 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
 
         case NKikimrSchemeOp::ESchemeOpTruncateTable:
             return *modifyScheme.MutableTruncateTable()->MutableTableName();
+
+        case NKikimrSchemeOp::ESchemeOpCreateTestShardSet:
+            return *modifyScheme.MutableCreateTestShardSet()->MutableName();
+
+        case NKikimrSchemeOp::ESchemeOpDropTestShardSet:
+            return *modifyScheme.MutableDrop()->MutableName();
         }
         Y_UNREACHABLE();
     }
@@ -529,6 +539,7 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
         case NKikimrSchemeOp::ESchemeOpCreateSysView:
         case NKikimrSchemeOp::ESchemeOpCreateSecret:
         case NKikimrSchemeOp::ESchemeOpCreateStreamingQuery:
+        case NKikimrSchemeOp::ESchemeOpCreateTestShardSet:
             return true;
         default:
             return false;
@@ -578,7 +589,8 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
     void ReportStatus(TEvTxUserProxy::TEvProposeTransactionStatus::EStatus status,
         const NKikimrScheme::TEvModifySchemeTransactionResult* shardResult,
         const NYql::TIssue* issue,
-        const TActorContext& ctx)
+        const TActorContext& ctx,
+        const TString& path = {})
     {
         auto *result = new TEvTxUserProxy::TEvProposeTransactionStatus(status);
         if (issue) {
@@ -621,7 +633,11 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
                 case TEvTxUserProxy::TEvProposeTransactionStatus::EStatus::ResolveError:
                     // (xenoxeno) for compatibility with KQP and maybe others...
                     result->Record.SetSchemeShardStatus(NKikimrScheme::EStatus::StatusPathDoesNotExist);
-                    result->Record.SetSchemeShardReason("Path does not exist");
+                    if (path) {
+                        result->Record.SetSchemeShardReason(TStringBuilder() << "Path `" << path << "` does not exist");
+                    } else {
+                        result->Record.SetSchemeShardReason("Path does not exist");
+                    }
                     break;
                 case TEvTxUserProxy::TEvProposeTransactionStatus::EStatus::ProxyShardNotAvailable:
                     result->Record.SetSchemeShardStatus(NKikimrScheme::EStatus::StatusNotAvailable);
@@ -917,6 +933,7 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
         case NKikimrSchemeOp::ESchemeOpDropBackupCollection:
         case NKikimrSchemeOp::ESchemeOpDropSecret:
         case NKikimrSchemeOp::ESchemeOpDropStreamingQuery:
+        case NKikimrSchemeOp::ESchemeOpDropTestShardSet:
         {
             auto toResolve = TPathToResolve(pbModifyScheme);
             toResolve.Path = Merge(workingDir, SplitPath(GetPathNameForScheme(pbModifyScheme)));
@@ -980,6 +997,7 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
         case NKikimrSchemeOp::ESchemeOpCreateResourcePool:
         case NKikimrSchemeOp::ESchemeOpCreateBackupCollection:
         case NKikimrSchemeOp::ESchemeOpCreateStreamingQuery:
+        case NKikimrSchemeOp::ESchemeOpCreateTestShardSet:
         {
             auto toResolve = TPathToResolve(pbModifyScheme);
             toResolve.Path = workingDir;
@@ -1052,6 +1070,14 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
             toResolve.Path = workingDir;
             auto collectionPath = SplitPath(pbModifyScheme.GetBackupIncrementalBackupCollection().GetName());
             std::move(collectionPath.begin(), collectionPath.end(), std::back_inserter(toResolve.Path));
+            toResolve.RequireAccess = NACLib::EAccessRights::GenericWrite;
+            ResolveForACL.push_back(toResolve);
+            break;
+        }
+        case NKikimrSchemeOp::ESchemeOpCreateFullBackupOp: {
+            // WorkingDir IS the backup-collection path; no sub-name to append.
+            auto toResolve = TPathToResolve(pbModifyScheme);
+            toResolve.Path = workingDir;
             toResolve.RequireAccess = NACLib::EAccessRights::GenericWrite;
             ResolveForACL.push_back(toResolve);
             break;
@@ -1282,12 +1308,12 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
             }
             case NSchemeCache::TSchemeCacheNavigate::EStatus::PathErrorUnknown:
                 TxProxyMon->ResolveKeySetWrongRequest->Inc();
-                ReportStatus(TEvTxUserProxy::TEvProposeTransactionStatus::EStatus::ResolveError, ctx);
+                ReportStatus(TEvTxUserProxy::TEvProposeTransactionStatus::EStatus::ResolveError, nullptr, nullptr, ctx, CanonizePath(entry.Path));
                 break;
             case NSchemeCache::TSchemeCacheNavigate::EStatus::PathNotPath:
             case NSchemeCache::TSchemeCacheNavigate::EStatus::RootUnknown:
                 TxProxyMon->ResolveKeySetWrongRequest->Inc();
-                ReportStatus(TEvTxUserProxy::TEvProposeTransactionStatus::EStatus::ResolveError, ctx);
+                ReportStatus(TEvTxUserProxy::TEvProposeTransactionStatus::EStatus::ResolveError, nullptr, nullptr, ctx, CanonizePath(entry.Path));
                 break;
             case NSchemeCache::TSchemeCacheNavigate::EStatus::LookupError:
             case NSchemeCache::TSchemeCacheNavigate::EStatus::RedirectLookupError:
@@ -1298,7 +1324,7 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
             case NSchemeCache::TSchemeCacheNavigate::EStatus::TableCreationNotComplete:
             case NSchemeCache::TSchemeCacheNavigate::EStatus::Unknown:
                 TxProxyMon->ResolveKeySetFail->Inc();
-                ReportStatus(TEvTxUserProxy::TEvProposeTransactionStatus::EStatus::ResolveError, ctx);
+                ReportStatus(TEvTxUserProxy::TEvProposeTransactionStatus::EStatus::ResolveError, nullptr, nullptr, ctx, CanonizePath(entry.Path));
                 break;
             }
 

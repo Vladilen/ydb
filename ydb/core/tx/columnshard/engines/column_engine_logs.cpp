@@ -4,6 +4,7 @@
 #include "changes/cleanup_portions.h"
 #include "changes/cleanup_tables.h"
 #include "changes/counters/general.h"
+#include "changes/general_compaction.h"
 #include "changes/ttl.h"
 #include "loading/stages.h"
 
@@ -237,8 +238,7 @@ TColumnEngineForLogs::TColumnEngineForLogs(const ui64 tabletId, const std::share
     , LastPortion(0)
     , LastGranule(0)
 {
-    AFL_VERIFY(SchemaObjectsCache);
-    ActualizationController = std::make_shared<NActualizer::TController>();
+    InitDerivedState();
     RegisterSchemaVersion(snapshot, presetId, schema);
 }
 
@@ -256,9 +256,14 @@ TColumnEngineForLogs::TColumnEngineForLogs(const ui64 tabletId, const std::share
     , LastPortion(0)
     , LastGranule(0)
 {
+    InitDerivedState();
+    RegisterSchemaVersion(snapshot, std::move(schema));
+}
+
+void TColumnEngineForLogs::InitDerivedState() {
     AFL_VERIFY(SchemaObjectsCache);
     ActualizationController = std::make_shared<NActualizer::TController>();
-    RegisterSchemaVersion(snapshot, std::move(schema));
+    Counters->SetSmallBlobThresholdBytes(StoragesManager->GetDefaultOperator()->GetSmallBlobThresholdBytes());
 }
 
 void TColumnEngineForLogs::RegisterSchemaVersion(const TSnapshot& snapshot, TIndexInfo&& indexInfo) {
@@ -432,8 +437,38 @@ std::vector<std::shared_ptr<TColumnEngineChanges>> TColumnEngineForLogs::StartCo
     return changes;
 }
 
+bool TColumnEngineForLogs::UsesPullCompactionScheduling() const noexcept {
+    const auto granules = GranulesStorage->GetGranulesForCompaction();
+    if (granules.empty()) {
+        return false;
+    }
+    return granules.front().GetGranule()->UsesPullCompactionScheduling();
+}
+
+std::shared_ptr<NCompaction::TGeneralCompactColumnEngineChanges> TColumnEngineForLogs::GetNextCompactionTask(
+    const std::shared_ptr<NDataLocks::TManager>& dataLocksManager) noexcept {
+    AFL_VERIFY(dataLocksManager);
+    auto granulesSortedDesc = GranulesStorage->GetGranulesForCompaction();
+    for (auto& orderedG : granulesSortedDesc) {
+        auto granule = orderedG.GetGranule();
+        TMonotonic startTime = TMonotonic::Now();
+        auto change = granule->GetNextOptimizationTask(granule, dataLocksManager);
+        NChanges::TGeneralCompactionCounters::OnTasksGeneratred((TMonotonic::Now() - startTime).MicroSeconds(), change ? 1 : 0);
+        if (change) {
+            AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD)("event", "found next compaction task")("weight", orderedG.GetPriority().DebugString())(
+                "path_id", granule->GetPathId());
+            return std::static_pointer_cast<NCompaction::TGeneralCompactColumnEngineChanges>(change);
+        }
+        AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD)("event", "cannot build next optimization task for granule")(
+            "weight", orderedG.GetPriority().DebugString())("path_id", granule->GetPathId());
+    }
+    AFL_DEBUG(NKikimrServices::TX_COLUMNSHARD)("event", "no next compaction task");
+    return nullptr;
+}
+
 std::shared_ptr<TCleanupTablesColumnEngineChanges> TColumnEngineForLogs::StartCleanupTables(
-    const THashSet<TInternalPathId>& pathsToDrop) noexcept {
+    const THashSet<TInternalPathId>& pathsToDrop, const std::shared_ptr<NDataLocks::TManager>& dataLocksManager) noexcept {
+    AFL_VERIFY(dataLocksManager);
     if (pathsToDrop.empty()) {
         return nullptr;
     }
@@ -441,12 +476,23 @@ std::shared_ptr<TCleanupTablesColumnEngineChanges> TColumnEngineForLogs::StartCl
 
     ui64 txSize = 0;
     const ui64 txSizeLimit = TGlobalLimits::TxWriteLimitBytes / 4;
+    auto onPathProcessed = [&]() {
+        txSize += 256;
+        return txSize > txSizeLimit;
+    };
     for (TInternalPathId pathId : pathsToDrop) {
+        if (auto g = GranulesStorage->GetGranuleOptional(pathId)) {
+            if (dataLocksManager->IsLocked(*g, NDataLocks::ELockCategory::Tables)) {
+                if (onPathProcessed()) {
+                    break;
+                }
+                continue;
+            }
+        }
         if (!HasDataInPathId(pathId)) {
             changes->TablesToDrop.emplace(pathId);
         }
-        txSize += 256;
-        if (txSize > txSizeLimit) {
+        if (onPathProcessed()) {
             break;
         }
     }

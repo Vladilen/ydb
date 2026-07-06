@@ -49,6 +49,9 @@ void TColumnShard::OverloadWriteFail(const EOverloadStatus overloadReason, const
         case EOverloadStatus::RejectProbability:
             Counters.OnWriteOverloadRejectProbability(writeSize);
             break;
+        case EOverloadStatus::SmallBlobsQuota:
+            Counters.OnWriteOverloadSmallBlobsQuota(writeSize);
+            break;
         case EOverloadStatus::None:
             Y_ABORT("invalid function usage");
     }
@@ -60,6 +63,9 @@ void TColumnShard::OverloadWriteFail(const EOverloadStatus overloadReason, const
 }
 
 TColumnShard::EOverloadStatus TColumnShard::CheckOverloadedWait(const TInternalPathId pathId) const {
+    if (AppDataVerified().FeatureFlags.GetEnableSmallBlobsQuotaEnforcement() && SpaceWatcher->SubDomainSmallBlobsQuotaExceeded) {
+        return EOverloadStatus::SmallBlobsQuota;
+    }
     Counters.GetCSCounters().OnIndexMetadataLimit(NOlap::IColumnEngine::GetMetadataLimit());
     if (TablesManager.GetPrimaryIndex()) {
         if (TablesManager.GetPrimaryIndex()->IsOverloadedByMetadata(NOlap::IColumnEngine::GetMetadataLimit())) {
@@ -526,7 +532,8 @@ void TColumnShard::Handle(NEvents::TDataEvents::TEvWrite::TPtr& ev, const TActor
         return;
     }
 
-    const bool outOfSpace = SpaceWatcher->SubDomainOutOfSpace && (*mType != NEvWrite::EModificationType::Delete);
+    const bool isDelete = *mType == NEvWrite::EModificationType::Delete;
+    const bool outOfSpace = SpaceWatcher->SubDomainOutOfSpace && !isDelete;
     if (outOfSpace) {
         AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "skip_writing")("reason", "quota_exceeded")("source", "dataevent");
     }
@@ -537,11 +544,13 @@ void TColumnShard::Handle(NEvents::TDataEvents::TEvWrite::TPtr& ev, const TActor
         overloadStatus = ResourcesStatusToOverloadStatus(Counters.GetWritesMonitor()->OnStartWrite(arrowData->GetSize()));
     }
     if (overloadStatus.Status != EOverloadStatus::None) {
+        const NKikimrDataEvents::TEvWriteResult::EStatus writeStatus =
+            outOfSpace ? NKikimrDataEvents::TEvWriteResult::STATUS_DATABASE_DISK_SPACE_QUOTA_EXCEEDED
+                       : NKikimrDataEvents::TEvWriteResult::STATUS_OVERLOADED;
         LWPROBE(EvWriteResult, TabletID(), source.ToString(), record.GetTxId(), cookie, "immediate error", false, "overload data error");
         LWPROBE(EvWrite, TabletID(), source.ToString(), cookie, record.GetTxId(), writeTimeout.value_or(TDuration::Max()), arrowData->GetSize(),
-            "", false, operation.GetIsBulk(), ToString(NKikimrDataEvents::TEvWriteResult::STATUS_OVERLOADED),
-            "overload data error " + ToString(overloadStatus.Status));
-        auto result = NEvents::TDataEvents::TEvWriteResult::BuildError(TabletID(), 0, NKikimrDataEvents::TEvWriteResult::STATUS_OVERLOADED,
+            "", false, operation.GetIsBulk(), ToString(writeStatus), "overload data error " + ToString(overloadStatus.Status));
+        auto result = NEvents::TDataEvents::TEvWriteResult::BuildError(TabletID(), 0, writeStatus,
             TStringBuilder{} << "Column shard " << TabletID() << " is overloaded. Reason: " << overloadStatus.Reason);
 
         if ((overloadStatus.Status == EOverloadStatus::ShardWritesSizeInFly || overloadStatus.Status == EOverloadStatus::ShardWritesInFly) &&

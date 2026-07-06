@@ -3,6 +3,9 @@
 
 #include "sql_select_yql.h"
 
+#include <yql/essentials/core/langver/feature.gen.h>
+#include <yql/essentials/utils/string/trim_indent.h>
+
 #include <library/cpp/iterator/cartesian_product.h>
 
 #include <util/generic/overloaded.h>
@@ -131,7 +134,8 @@ Y_UNIT_TEST(TokensAsTableAlias) { // id_table
 Y_UNIT_TEST(TokensAsHints) { // id_hint
     auto failed = ValidateTokens({"AUTOMAP", "CALLABLE", "COLUMNS", "DICT", "ENUM", "FALSE", "FLOW",
                                   "LIST", "OPTIONAL", "REPEATABLE", "RESOURCE",
-                                  "SCHEMA", "SET", "STRUCT", "TAGGED", "TRUE", "TUPLE", "VARIANT"},
+                                  "SCHEMA", "SET", "STRUCT", "TAGGED", "TRUE", "TUPLE", "VARIANT",
+                                  "WATERMARK"},
                                  [](const TString& token) {
                                      TStringBuilder req;
                                      req << "SELECT * FROM Plato.Input WITH " << token;
@@ -170,6 +174,136 @@ Y_UNIT_TEST(TokensAsIdExprIn) { // id_expr_in
 Y_UNIT_TEST(TableHints) {
     UNIT_ASSERT(SqlToYql("SELECT * FROM plato.Input WITH INFER_SCHEMA").IsOk());
     UNIT_ASSERT(SqlToYql("SELECT * FROM plato.Input WITH (INFER_SCHEMA)").IsOk());
+}
+
+Y_UNIT_TEST(TableHintsTableRef) {
+    ExpectFailWithError(
+        R"sql(
+            $input = SELECT 1 AS ts;
+            SELECT * FROM $input WITH XLOCK;
+        )sql",
+        "<main>:3:20: Error: Hint 'XLOCK' requires a table\n");
+
+    auto res = SqlToYql("$input = SELECT 1 AS ts; SELECT * FROM $input WITH WATERMARK = ts");
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"watermark", "WatermarkGenerator"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["watermark"], 0);
+    UNIT_ASSERT_VALUES_EQUAL(stat["WatermarkGenerator"], 1);
+}
+
+Y_UNIT_TEST(TableHintsSelect) {
+    ExpectFailWithError(
+        R"sql(
+            SELECT * FROM (SELECT 1 AS ts) WITH XLOCK;
+        )sql",
+        "<main>:2:20: Error: Hint 'XLOCK' requires a table\n");
+
+    auto res = SqlToYql("SELECT * FROM (SELECT 1 AS ts) WITH WATERMARK = ts");
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"watermark", "WatermarkGenerator"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["watermark"], 0);
+    UNIT_ASSERT_VALUES_EQUAL(stat["WatermarkGenerator"], 1);
+}
+
+Y_UNIT_TEST(SelectStarStripsConfiguredSystemColumnPrefixes) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.ExtraSystemColumnPrefixes = {"__ydb_row_id"};
+    auto res = SqlToYqlWithSettings("SELECT * FROM plato.Input;", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"RemoveSystemMembers", "RemovePrefixMembers"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["RemoveSystemMembers"], 1);
+    UNIT_ASSERT_VALUES_EQUAL(stat["RemovePrefixMembers"], 1);
+}
+
+Y_UNIT_TEST(SelectSystemColumnIsNotStrippedConfiguredSystemColumnPrefixes) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.ExtraSystemColumnPrefixes = {"__ydb_row_id"};
+    auto res = SqlToYqlWithSettings("SELECT __ydb_row_id FROM plato.Input;", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"RemoveSystemMembers", "RemovePrefixMembers"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["RemoveSystemMembers"], 0);
+    UNIT_ASSERT_VALUES_EQUAL(stat["RemovePrefixMembers"], 0);
+}
+
+Y_UNIT_TEST(SelectStarKeepsDefaultCleanupWithoutSystemColumnPrefixes) {
+    auto res = SqlToYql("SELECT * FROM plato.Input;");
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"RemoveSystemMembers", "RemovePrefixMembers"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["RemoveSystemMembers"], 1);
+    UNIT_ASSERT_VALUES_EQUAL(stat["RemovePrefixMembers"], 0);
+}
+
+Y_UNIT_TEST(QualifiedAsteriskStripsConfiguredSystemColumnPrefixes) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.ExtraSystemColumnPrefixes = {"__ydb_row_id"};
+    auto res = SqlToYqlWithSettings(
+        "PRAGMA DisableSimpleColumns;"
+        "SELECT interested_table.* FROM plato.Input AS interested_table;",
+        settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TVerifyLineFunc verifyLine = [](const TString& word, const TString& line) {
+        if (word == "RemovePrefixMembers") {
+            UNIT_ASSERT_VALUES_UNEQUAL(TString::npos, line.find("interested_table._yql_"));
+            UNIT_ASSERT_VALUES_UNEQUAL(TString::npos, line.find("interested_table.__ydb_row_id"));
+        }
+    };
+    TWordCountHive stat = {{TString("RemovePrefixMembers"), 0}};
+    VerifyProgram(res, stat, verifyLine);
+    UNIT_ASSERT_VALUES_EQUAL(stat["RemovePrefixMembers"], 1);
+}
+
+Y_UNIT_TEST(TableHintsValues) {
+    ExpectFailWithError(
+        R"sql(
+            SELECT * FROM (VALUES (1)) WITH XLOCK;
+        )sql",
+        "<main>:2:45: Error: Hint 'XLOCK' requires a table\n");
+
+    auto res = SqlToYql("SELECT * FROM (VALUES (1)) WITH WATERMARK = ts");
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"watermark", "WatermarkGenerator"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["watermark"], 0);
+    UNIT_ASSERT_VALUES_EQUAL(stat["WatermarkGenerator"], 1);
+}
+
+Y_UNIT_TEST(TableRefAnonymousTableHintsRejected) {
+    ExpectFailWithError(
+        R"sql(
+            USE plato;
+            $input = SELECT 1 AS value;
+            SELECT * FROM @$input WITH XLOCK;
+        )sql",
+        "<main>:4:40: Error: Hints are not supported for anonymous tables\n");
+}
+
+Y_UNIT_TEST(TableRefSubqueryHintsRejected) {
+    ExpectFailWithError(
+        R"sql(
+            $input = SELECT 1 AS value;
+            SELECT * FROM $input WITH XLOCK;
+        )sql",
+        "<main>:3:20: Error: Hint 'XLOCK' requires a table\n");
+}
+
+Y_UNIT_TEST(AsTableHintsRejected) {
+    ExpectFailWithError(
+        R"sql(
+            SELECT * FROM AS_TABLE([<|value:1|>]) WITH XLOCK;
+        )sql",
+        "<main>:2:56: Error: Hint 'XLOCK' requires a table\n");
 }
 
 Y_UNIT_TEST(InNoHints) {
@@ -2269,7 +2403,7 @@ Y_UNIT_TEST(UnionTest) {
 
 Y_UNIT_TEST(UnionDistinctTest) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 3);
+    settings.LangVer = NYql::NFeature::UnionDistinct.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(
         R"sql(SELECT key FROM plato.Input UNION DISTINCT SELECT subkey FROM plato.Input;)sql",
@@ -2295,13 +2429,14 @@ Y_UNIT_TEST(LegacyNotNull2025_03) {
 
 Y_UNIT_TEST(LegacyNotNull2025_04) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 4);
+    settings.LangVer = NYql::GetMaxLangVersion();
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(
         R"sql(SELECT 1 NOT NULL)sql",
         settings);
 
     UNIT_ASSERT(!res.IsOk());
+    UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), "Missing IS keyword before NOT NULL");
 }
 
 Y_UNIT_TEST(UnionAggregationTest) {
@@ -2385,7 +2520,7 @@ Y_UNIT_TEST(UnionAssumeOrderByWarning) {
 
 Y_UNIT_TEST(IntersectAllTest) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = 202503;
+    settings.LangVer = NYql::NFeature::ExceptIntersect.MinLangVer;
     NYql::TAstParseResult res = SqlToYqlWithSettings("SELECT key FROM plato.Input INTERSECT ALL SELECT subkey FROM plato.Input;", settings);
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
 
@@ -2396,7 +2531,7 @@ Y_UNIT_TEST(IntersectAllTest) {
 
 Y_UNIT_TEST(IntersectTest) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = 202503;
+    settings.LangVer = NYql::NFeature::ExceptIntersect.MinLangVer;
     NYql::TAstParseResult res = SqlToYqlWithSettings("SELECT key FROM plato.Input INTERSECT SELECT subkey FROM plato.Input;", settings);
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
 
@@ -2407,7 +2542,7 @@ Y_UNIT_TEST(IntersectTest) {
 
 Y_UNIT_TEST(IntersectDistinctTest) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = 202503;
+    settings.LangVer = NYql::NFeature::ExceptIntersect.MinLangVer;
     NYql::TAstParseResult res = SqlToYqlWithSettings("SELECT key FROM plato.Input INTERSECT DISTINCT SELECT subkey FROM plato.Input;", settings);
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
 
@@ -2418,7 +2553,7 @@ Y_UNIT_TEST(IntersectDistinctTest) {
 
 Y_UNIT_TEST(IntersectAllPositionalTest) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = 202503;
+    settings.LangVer = NYql::NFeature::ExceptIntersect.MinLangVer;
     NYql::TAstParseResult res = SqlToYqlWithSettings("PRAGMA PositionalUnionAll; SELECT key FROM plato.Input INTERSECT ALL SELECT subkey FROM plato.Input;", settings);
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
 
@@ -2429,7 +2564,7 @@ Y_UNIT_TEST(IntersectAllPositionalTest) {
 
 Y_UNIT_TEST(IntersectDistinctPositionalTest) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = 202503;
+    settings.LangVer = NYql::NFeature::ExceptIntersect.MinLangVer;
     NYql::TAstParseResult res = SqlToYqlWithSettings("PRAGMA PositionalUnionAll; SELECT key FROM plato.Input INTERSECT DISTINCT SELECT subkey FROM plato.Input;", settings);
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
 
@@ -2440,7 +2575,7 @@ Y_UNIT_TEST(IntersectDistinctPositionalTest) {
 
 Y_UNIT_TEST(MultipleIntersectTest) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = 202503;
+    settings.LangVer = NYql::NFeature::ExceptIntersect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings("SELECT key FROM plato.Input INTERSECT SELECT subkey FROM plato.Input INTERSECT SELECT subkey FROM plato.Input;", settings);
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
@@ -2469,7 +2604,7 @@ Y_UNIT_TEST(MultipleIntersectTest) {
 
 Y_UNIT_TEST(ExceptAllTest) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = 202503;
+    settings.LangVer = NYql::NFeature::ExceptIntersect.MinLangVer;
     NYql::TAstParseResult res = SqlToYqlWithSettings("SELECT key FROM plato.Input EXCEPT ALL SELECT subkey FROM plato.Input;", settings);
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
 
@@ -2480,7 +2615,7 @@ Y_UNIT_TEST(ExceptAllTest) {
 
 Y_UNIT_TEST(ExceptTest) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = 202503;
+    settings.LangVer = NYql::NFeature::ExceptIntersect.MinLangVer;
     NYql::TAstParseResult res = SqlToYqlWithSettings("SELECT key FROM plato.Input EXCEPT SELECT subkey FROM plato.Input;", settings);
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
 
@@ -2491,7 +2626,7 @@ Y_UNIT_TEST(ExceptTest) {
 
 Y_UNIT_TEST(ExceptDistinctTest) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = 202503;
+    settings.LangVer = NYql::NFeature::ExceptIntersect.MinLangVer;
     NYql::TAstParseResult res = SqlToYqlWithSettings("SELECT key FROM plato.Input EXCEPT DISTINCT SELECT subkey FROM plato.Input;", settings);
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
 
@@ -2502,7 +2637,7 @@ Y_UNIT_TEST(ExceptDistinctTest) {
 
 Y_UNIT_TEST(ExceptAllPositionalTest) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = 202503;
+    settings.LangVer = NYql::NFeature::ExceptIntersect.MinLangVer;
     NYql::TAstParseResult res = SqlToYqlWithSettings("PRAGMA PositionalUnionAll; SELECT key FROM plato.Input EXCEPT ALL SELECT subkey FROM plato.Input;", settings);
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
 
@@ -2513,7 +2648,7 @@ Y_UNIT_TEST(ExceptAllPositionalTest) {
 
 Y_UNIT_TEST(ExceptDistinctPositionalTest) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = 202503;
+    settings.LangVer = NYql::NFeature::ExceptIntersect.MinLangVer;
     NYql::TAstParseResult res = SqlToYqlWithSettings("PRAGMA PositionalUnionAll; SELECT key FROM plato.Input EXCEPT DISTINCT SELECT subkey FROM plato.Input;", settings);
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
 
@@ -2524,7 +2659,7 @@ Y_UNIT_TEST(ExceptDistinctPositionalTest) {
 
 Y_UNIT_TEST(MultipleExceptTest) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = 202503;
+    settings.LangVer = NYql::NFeature::ExceptIntersect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings("SELECT key FROM plato.Input EXCEPT SELECT subkey FROM plato.Input EXCEPT SELECT subkey FROM plato.Input;", settings);
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
@@ -2986,7 +3121,7 @@ Y_UNIT_TEST(ForStatementLangVerFailure) {
 
 Y_UNIT_TEST(ForStatementLangVerSuccess) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2026, 2);
+    settings.LangVer = NYql::NFeature::ForWithoutEvaluate.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         FOR $i IN AsList(1,2,3) DO BEGIN
@@ -3008,52 +3143,41 @@ Y_UNIT_TEST(ParallelForStatementLangVer) {
         "PARALLEL FOR is not available before language version 2026.02");
 }
 
-#ifdef YQL_BUILTIN_MIN_MAX_LANGVER
+Y_UNIT_TEST(FunctionLangVerUnavailable) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.Flags.insert("CheckBuiltinLangVer");
 
-Y_UNIT_TEST(FunctionLangVer) {
-    {
-        NYql::TAstParseResult res = SqlToYql(R"sql(
-            SELECT FormatType(AsOptionalType(Int32));
-        )sql");
-        UNIT_ASSERT(!res.IsOk());
-        UNIT_ASSERT_STRING_CONTAINS(
-            Err2Str(res),
-            "AsOptionalType is not available before language version 2026.01");
-    }
-    {
-        NSQLTranslation::TTranslationSettings settings;
-        settings.LangVer = NYql::MakeLangVersion(2026, 1);
-        NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
-            SELECT FormatType(AsOptionalType(Int32));
-        )sql", settings);
-        UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
-    }
-    {
-        NYql::TAstParseResult res = SqlToYql(R"sql(
-            SELECT AsOptional(1);
-        )sql");
-        UNIT_ASSERT(!res.IsOk());
-        UNIT_ASSERT_STRING_CONTAINS(
-            Err2Str(res),
-            "AsOptional is not available before language version 2026.01");
-    }
-    {
-        NSQLTranslation::TTranslationSettings settings;
-        settings.LangVer = NYql::MakeLangVersion(2026, 1);
-        NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
-            SELECT AsOptional(1);
-        )sql", settings);
-        UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
-    }
-    {
-        NYql::TAstParseResult res = SqlToYql(R"sql(
-            SELECT FormatType(OptionalType(Int32));
-        )sql");
-        UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
-    }
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        SELECT FormatType(AsOptionalType(Int32));
+    )sql", settings);
+
+    UNIT_ASSERT(!res.IsOk());
+    UNIT_ASSERT_STRING_CONTAINS(
+        Err2Str(res),
+        "AsOptionalType is not available before language version 2026.01");
 }
 
-#endif
+Y_UNIT_TEST(FunctionLangVerAvailable) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.Flags.insert("CheckBuiltinLangVer");
+    settings.LangVer = NYql::MakeLangVersion(2026, 1);
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        SELECT FormatType(AsOptionalType(Int32));
+    )sql", settings);
+
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+}
+
+Y_UNIT_TEST(FunctionLangVerUnknown) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.Flags.insert("CheckBuiltinLangVer");
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        SELECT FormatType(OptionalType(Int32));
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+}
 
 Y_UNIT_TEST(StringLiteralWithEscapedBackslash) {
     NYql::TAstParseResult res1 = SqlToYql(R"foo(SELECT 'a\\';)foo");
@@ -3152,6 +3276,7 @@ Y_UNIT_TEST(CombineLangverTest) {
         "Error: COMBINE is not available before language version 2026.02");
 }
 
+// TODO: rewrite to boilerplate
 NYql::TAstParseResult SqlToYql202602(const TString& query) {
     NSQLTranslation::TTranslationSettings settings;
     settings.LangVer = NYql::MakeLangVersion(2026, 2);
@@ -3163,6 +3288,7 @@ Y_UNIT_TEST(CombineSmokeTest) {
                            WITH plato.Input as B PRESORT B.key, B.subkey
                            ON A.key = B.key AND A.subkey = B.subkey
                            USING Foo::DoBar((A.value), (B.value)))sql";
+
     const auto res = SqlToYql202602(req);
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
 
@@ -4992,6 +5118,26 @@ Y_UNIT_TEST(ShowCreateView) {
     UNIT_ASSERT_VALUES_EQUAL(elementStat["showCreateView"], 1);
 }
 
+Y_UNIT_TEST(ShowCreateExternalDataSource) {
+    NYql::TAstParseResult res = SqlToYql(R"(
+            USE plato;
+            SHOW CREATE EXTERNAL DATA SOURCE source;
+        )");
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TVerifyLineFunc verifyLine = [](const TString& word, const TString& line) {
+        if (word == "Read") {
+            UNIT_ASSERT_STRING_CONTAINS(line, "showCreateExternalDataSource");
+        }
+    };
+
+    TWordCountHive elementStat = {{"Read"}, {"showCreateExternalDataSource"}};
+    VerifyProgram(res, elementStat, verifyLine);
+
+    UNIT_ASSERT_VALUES_EQUAL(elementStat["Read"], 1);
+    UNIT_ASSERT_VALUES_EQUAL(elementStat["showCreateExternalDataSource"], 1);
+}
+
 Y_UNIT_TEST(OptionalAliases) {
     UNIT_ASSERT(SqlToYql("USE plato; SELECT foo FROM (SELECT key foo FROM Input);").IsOk());
     UNIT_ASSERT(SqlToYql("USE plato; SELECT a.x FROM Input1 a JOIN Input2 b ON a.key = b.key;").IsOk());
@@ -5639,7 +5785,7 @@ Y_UNIT_TEST(CreateSecretWithExpressionOk) {
 
     { // Pure inline subquery: value = (SELECT 1)
         NSQLTranslation::TTranslationSettings settings;
-        settings.LangVer = NYql::MakeLangVersion(2025, 4);
+        settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
         auto res = SqlToYqlWithSettings(R"sql(
             USE plato;
             CREATE SECRET `x` WITH (VALUE = (SELECT 1));
@@ -5649,7 +5795,7 @@ Y_UNIT_TEST(CreateSecretWithExpressionOk) {
 
     { // Effectful inline subquery: value = (SELECT Max(value) FROM secrets)
         NSQLTranslation::TTranslationSettings settings;
-        settings.LangVer = NYql::MakeLangVersion(2025, 4);
+        settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
         auto res = SqlToYqlWithSettings(R"sql(
             USE plato;
             CREATE SECRET `x` WITH (VALUE = (SELECT Max(value) FROM secrets));
@@ -6274,7 +6420,6 @@ Y_UNIT_TEST(WarnForAggregationBySelectAlias) {
 
 Y_UNIT_TEST(WarnForAggregationBySelectAliasAsErrorStrict) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.Flags.emplace("StrictWarningAsError");
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
             PRAGMA Warning("error", "*");
@@ -6607,7 +6752,7 @@ Y_UNIT_TEST(AsteriskWithSomethingBefore) {
 Y_UNIT_TEST(DuplicatedQualifiedAsterisk) {
     NYql::TAstParseResult res = SqlToYql("select in.*, key, in.* from plato.Input as in;");
     UNIT_ASSERT(!res.IsOk());
-    UNIT_ASSERT_NO_DIFF(Err2Str(res), "<main>:1:19: Error: Unable to use twice same quialified asterisk. Invalid source: in\n");
+    UNIT_ASSERT_NO_DIFF(Err2Str(res), "<main>:1:19: Error: Unable to use twice same qualified asterisk. Invalid source: in\n");
 }
 
 Y_UNIT_TEST(BrokenLabel) {
@@ -6776,7 +6921,7 @@ Y_UNIT_TEST(ReplaceIntoMapReduce) {
     UNIT_ASSERT_NO_DIFF(Err2Str(res), "<main>:1:0: Error: REPLACE is not available before language version 2025.04\n");
 
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 4);
+    settings.LangVer = NYql::NFeature::ReplaceInto.MinLangVer;
 
     res = SqlToYqlWithSettings("REPLACE INTO plato.Output SELECT key FROM plato.Input", settings);
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
@@ -7040,6 +7185,37 @@ Y_UNIT_TEST(TooManyErrors) {
 )");
 };
 
+Y_UNIT_TEST(TooManyErrorsOnBuild) {
+    TString q = R"sql(
+        SELECT AsStruct(
+            1 as '1',
+            2 as '2',
+            3 as '3',
+            4 as '4',
+            5 as '5',
+            6 as '6',
+            7 as '7',
+            8 as '8',
+            9 as '9',
+            10 as '10',
+            11 as '11',
+            12 as '12'
+        );
+    )sql";
+
+    NYql::TAstParseResult res = SqlToYql(q, 4);
+    UNIT_ASSERT(!res.IsOk());
+    UNIT_ASSERT_NO_DIFF(
+        Err2Str(res),
+        NYql::TrimIndent(R"(
+            <main>:3:18: Error: String literal can not be used here
+            <main>:4:18: Error: String literal can not be used here
+            <main>:5:18: Error: String literal can not be used here
+            <main>: Error: Too many issues, code: 1
+
+        )"));
+};
+
 Y_UNIT_TEST(ShouldCloneBindingForNamedParameter) {
     NYql::TAstParseResult res = SqlToYql(R"($f = () -> {
     $value_type = TypeOf(1);
@@ -7112,6 +7288,38 @@ Y_UNIT_TEST(WarnOnRankExprWithUnorderedWindow) {
     NYql::TAstParseResult res = SqlToYql("SELECT RANK(key) OVER w FROM plato.Input WINDOW w AS ()");
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
     UNIT_ASSERT_NO_DIFF(Err2Str(res), "<main>:1:8: Warning: Rank(<expression>) is used with unordered window - the result is likely to be undefined, code: 4521\n");
+}
+
+Y_UNIT_TEST(AnsiCurrentRow) {
+    const auto check = [](TString spec, TString expected, TMaybe<TString> flag) {
+        TString query = R"sql(
+            $events = (SELECT * FROM (VALUES
+                (1, 10,  5),
+                (2, 10,  5),
+                (3, 20, 10)
+            ) AS events (event_id, ts, val));
+            SELECT ts, val, SUM(val) OVER (SPEC) AS run_sum FROM $events ORDER BY ts, event_id;
+        )sql";
+        SubstGlobal(query, "SPEC", spec);
+
+        NSQLTranslation::TTranslationSettings settings;
+        if (flag) {
+            settings.Flags.emplace(*flag);
+        }
+
+        NYql::TAstParseResult res = SqlToYqlWithSettings(query, settings);
+        UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+        TWordCountHive stat({"WinOnRows", "WinOnRange"});
+        VerifyProgram(res, stat);
+        UNIT_ASSERT_VALUES_EQUAL(stat["WinOnRows"], expected == "WinOnRows" ? 1 : 0);
+        UNIT_ASSERT_VALUES_EQUAL(stat["WinOnRange"], expected == "WinOnRange" ? 1 : 0);
+    };
+
+    check("ORDER BY ts", "WinOnRows", Nothing());
+    check("", "WinOnRows", Nothing());
+    check("ORDER BY ts", "WinOnRange", "AnsiCurrentRow");
+    check("", "WinOnRows", "AnsiCurrentRow");
 }
 
 Y_UNIT_TEST(AnyAsTableName) {
@@ -7989,6 +8197,12 @@ Y_UNIT_TEST(ScalarContextUsage4) {
     ExpectFailWithError(query, "<main>:3:39: Error: Source used in expression should contain one concrete column\n"
                                "<main>:4:25: Error: Source is used here\n");
 }
+Y_UNIT_TEST(TablesFunctionDisallowedByDefault) {
+    auto res = SqlToYql("USE plato; SELECT * FROM TABLES()");
+    UNIT_ASSERT(!res.IsOk());
+    UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), "TABLES is not allowed in this context");
+}
+
 } // Y_UNIT_TEST_SUITE(SqlToYQLErrors)
 
 inline void CheckUnused(const TString& req, const TString& symbol, unsigned row, unsigned col) {
@@ -8716,7 +8930,7 @@ Y_UNIT_TEST(MultilineComments) {
 #if ANTLR_VER == 3
     UNIT_ASSERT_NO_DIFF(Err2Str(res), "<main>:4:0: Error: Unexpected token '*' : cannot match to any predicted input...\n\n");
 #else
-    UNIT_ASSERT_NO_DIFF(Err2Str(res), "<main>:4:0: Error: mismatched input '*' expecting {<EOF>, ';', '(', '$', ALTER, ANALYZE, BACKUP, BATCH, COMBINE, COMMIT, CREATE, DECLARE, DEFINE, DELETE, DISCARD, DO, DROP, EVALUATE, EXPLAIN, EXPORT, FOR, FROM, GRANT, IF, IMPORT, INSERT, PARALLEL, PRAGMA, PROCESS, REDUCE, REPLACE, RESTORE, REVOKE, ROLLBACK, SELECT, SHOW, TRUNCATE, UPDATE, UPSERT, USE, VALUES}\n");
+    UNIT_ASSERT_NO_DIFF(Err2Str(res), "<main>:4:0: Error: mismatched input '*' expecting {<EOF>, ';', '(', '$', ALTER, ANALYZE, BACKUP, BATCH, COMBINE, COMMIT, CREATE, DECLARE, DEFINE, DELETE, DISCARD, DO, DROP, EVALUATE, EXPLAIN, EXPORT, FOR, FROM, GRANT, IF, IMPORT, INSERT, MATERIALIZE, PARALLEL, PRAGMA, PROCESS, REDUCE, REPLACE, RESTORE, REVOKE, ROLLBACK, SELECT, SHOW, TRUNCATE, UPDATE, UPSERT, USE, VALUES, WITH}\n");
 #endif
     res = SqlToYqlWithAnsiLexer(req);
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
@@ -10063,6 +10277,33 @@ Y_UNIT_TEST(CreateTopicConsumer) {
     TestQuery(R"(
             CREATE TOPIC topic1 (CONSUMER cons1, CONSUMER cons2 WITH (important = false, availability_period = Interval('PT9H'))) WITH (supported_codecs = "1,2,3");
         )");
+    TestQuery(R"(
+            CREATE TOPIC topic1 (
+                CONSUMER cons1 WITH (
+                    type = 'shared',
+                    receive_message_wait_time = Interval('PT5S'),
+                    receive_message_delay = Interval('PT7S')
+                )
+            );
+        )");
+}
+
+Y_UNIT_TEST(AlterTopicConsumerReceiveMessageSettings) {
+    TestQuery(R"(
+            ALTER TOPIC topic1
+                ADD CONSUMER cons1 WITH (
+                    type = 'shared',
+                    receive_message_wait_time = Interval('PT5S'),
+                    receive_message_delay = Interval('PT7S')
+                );
+        )");
+    TestQuery(R"(
+            ALTER TOPIC topic1
+                ALTER CONSUMER cons1 SET (
+                    receive_message_wait_time = Interval('PT2S'),
+                    receive_message_delay = Interval('PT3S')
+                );
+        )");
 }
 
 Y_UNIT_TEST(AlterTopicSimple) {
@@ -10108,69 +10349,69 @@ Y_UNIT_TEST(DropTopic) {
 Y_UNIT_TEST(TopicBadRequests) {
     TestQuery(R"(
             CREATE TOPIC topic1();
-        )", false);
+        )", /*expectOk=*/false);
     TestQuery(R"(
             CREATE TOPIC topic1 SET setting1 = value1;
-        )", false);
+        )", /*expectOk=*/false);
     TestQuery(R"(
             ALTER TOPIC topic1 SET setting1 value1;
-        )", false);
+        )", /*expectOk=*/false);
     TestQuery(R"(
             ALTER TOPIC topic1 RESET setting1;
-        )", false);
+        )", /*expectOk=*/false);
 
     TestQuery(R"(
             ALTER TOPIC topic1 DROP CONSUMER consumer4 WITH (k1 = v1);
-        )", false);
+        )", /*expectOk=*/false);
 
     TestQuery(R"(
             CREATE TOPIC topic1 WITH (retention_period = 123);
-        )", false,
+        )", /*expectOk=*/false,
               {"3:58: Error: Literal of Interval type is expected for retention"});
     TestQuery(R"(
             CREATE TOPIC topic1 WITH (metrics_level = "1");
-        )", false,
+        )", /*expectOk=*/false,
               {"3:55: Error: METRICS_LEVEL value should be an integer"});
     TestQuery(R"(
             CREATE TOPIC topic1 (CONSUMER cons1, CONSUMER cons1 WITH (important = false));
-        )", false,
+        )", /*expectOk=*/false,
               {"3:59: Error: Consumer cons1 defined more than once"});
     TestQuery(R"(
             CREATE TOPIC topic1 (CONSUMER cons1 WITH (bad_option = false));
-        )", false,
+        )", /*expectOk=*/false,
               {"3:68: Error: BAD_OPTION: unknown option for consumer"});
     TestQuery(R"(
             CREATE TOPIC topic1 (CONSUMER cons1 WITH (important = false, important = true));
-        )", false,
+        )", /*expectOk=*/false,
               {"3:86: Error: IMPORTANT specified multiple times in CONSUMER statement for single consumer"});
     TestQuery(R"(
             ALTER TOPIC topic1 SET (metrics_level = "1");
-        )", false,
+        )", /*expectOk=*/false,
               {"3:53: Error: METRICS_LEVEL value should be an integer"});
     TestQuery(R"(
             ALTER TOPIC topic1 ADD CONSUMER cons1, ALTER CONSUMER cons1 RESET (important);
-        )", false,
+        )", /*expectOk=*/false,
               {"3:80: Error: IMPORTANT reset is not supported"});
     TestQuery(R"(
             ALTER TOPIC topic1 ADD CONSUMER consumer1,
                 ALTER CONSUMER consumer3 SET (supported_codecs = "RAW", read_from = 1),
                 ALTER CONSUMER consumer3 RESET (supported_codecs);
-        )", false,
+        )", /*expectOk=*/false,
               {"5:49: Error: SUPPORTED_CODECS specified multiple times in ALTER CONSUMER statement for single consumer"});
     TestQuery(R"(
             ALTER TOPIC topic1 ADD CONSUMER consumer1,
                 ALTER CONSUMER consumer3 SET (supported_codecs = "RAW", read_from = 1),
                 ALTER CONSUMER consumer3 SET (read_from = 2);
-        )", false,
+        )", /*expectOk=*/false,
               {"5:59: Error: READ_FROM specified multiple times in CONSUMER statement for single consumer"});
     TestQuery(R"(
             CREATE TOPIC topic1 (CONSUMER cons1 WITH (availability_period = 3600));
-        )", false,
+        )", /*expectOk=*/false,
               {"3:77: Error: Literal of Interval type is expected for AVAILABILITY_PERIOD setting"});
     TestQuery(R"(
             ALTER TOPIC topic1
                 ALTER CONSUMER consumer3 SET (availability_period = false);
-        )", false,
+        )", /*expectOk=*/false,
               {"4:69: Error: Literal of Interval type is expected for AVAILABILITY_PERIOD setting"});
 }
 
@@ -10349,7 +10590,7 @@ Y_UNIT_TEST(DropViewIfExists) {
 Y_UNIT_TEST(DropViewIfExistsYt) {
     constexpr const char* name = "TheView";
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 5);
+    settings.LangVer = NYql::NFeature::YtDropView.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(std::format(R"(
                 USE plato;
@@ -11633,9 +11874,10 @@ Y_UNIT_TEST(DeduplicationSameSource) {
 } // Y_UNIT_TEST_SUITE(Aggregation)
 
 Y_UNIT_TEST_SUITE(AggregationPhases) {
+
 Y_UNIT_TEST(TwoArg) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::GetMaxLangVersion();
+    settings.LangVer = NYql::NFeature::AggPhases.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         SELECT AvgIf(a, a % 2 == 0) FROM (SELECT 1 AS k, 2 AS a) GROUP BY k;
@@ -11648,7 +11890,7 @@ Y_UNIT_TEST(TwoArg) {
 
 Y_UNIT_TEST(SingleArg) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::GetMaxLangVersion();
+    settings.LangVer = NYql::NFeature::AggPhases.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         SELECT AvgIf(a) FROM (SELECT 1 AS k, 2 AS a) GROUP BY k WITH CombineState;
@@ -11657,80 +11899,202 @@ Y_UNIT_TEST(SingleArg) {
 
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
 }
+
+Y_UNIT_TEST(Distinct) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::AggPhases.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        SELECT Avg(DISTINCT a) FROM (SELECT 1 AS k, 2 AS a) GROUP BY k WITH CombineState;
+    )sql", settings);
+    UNIT_ASSERT(!res.IsOk());
+    UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), "Distinct is not supported with aggregation phases");
+}
+
 } // Y_UNIT_TEST_SUITE(AggregationPhases)
 
 Y_UNIT_TEST_SUITE(Watermarks) {
 Y_UNIT_TEST(InsertAs) {
-    const auto stmt = R"sql(
-USE plato;
+    auto res = SqlToYql(R"sql(
+        USE plato;
 
-INSERT INTO Output
-SELECT
-    *
-FROM Input
-WITH(
-    SCHEMA(
-        ts Timestamp,
-    ),
-    WATERMARK AS (CAST(ts AS TImestamp))
-);
-)sql";
-    const auto& res = SqlToYql(stmt);
+        INSERT INTO Output
+        SELECT * FROM Input
+        WITH WATERMARK AS (ts - Interval("PT1S"));
+    )sql");
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"watermark", "WatermarkGenerator"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["watermark"], 1);
+    UNIT_ASSERT_VALUES_EQUAL(stat["WatermarkGenerator"], 0);
 }
 
 Y_UNIT_TEST(SelectAs) {
-    const auto stmt = R"sql(
-USE plato;
+    auto res = SqlToYql(R"sql(
+        USE plato;
 
-SELECT
-    *
-FROM Input
-WITH(
-    SCHEMA(
-        ts Timestamp,
-    ),
-    WATERMARK AS (CAST(ts AS TImestamp))
-);
-)sql";
-    const auto& res = SqlToYql(stmt);
+        SELECT * FROM Input
+        WITH WATERMARK AS (ts - Interval("PT1S"));
+    )sql");
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"watermark", "WatermarkGenerator"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["watermark"], 1);
+    UNIT_ASSERT_VALUES_EQUAL(stat["WatermarkGenerator"], 0);
 }
-Y_UNIT_TEST(InsertEquals) {
-    const auto stmt = R"sql(
-USE plato;
 
-INSERT INTO Output
-SELECT
-    *
-FROM Input
-WITH(
-    SCHEMA(
-        ts Timestamp,
-    ),
-    WATERMARK = CAST(ts AS TImestamp)
-);
-)sql";
-    const auto& res = SqlToYql(stmt);
+Y_UNIT_TEST(InsertEquals) {
+    auto res = SqlToYql(R"sql(
+        USE plato;
+
+        INSERT INTO Output
+        SELECT * FROM Input
+        WITH WATERMARK = ts - Interval("PT1S");
+    )sql");
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"watermark", "WatermarkGenerator"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["watermark"], 1);
+    UNIT_ASSERT_VALUES_EQUAL(stat["WatermarkGenerator"], 0);
 }
 
 Y_UNIT_TEST(SelectEquals) {
-    const auto stmt = R"sql(
-USE plato;
+    auto res = SqlToYql(R"sql(
+        USE plato;
 
-SELECT
-    *
-FROM Input
-WITH(
-    SCHEMA(
-        ts Timestamp,
-    ),
-    WATERMARK = CAST(ts AS TImestamp)
-);
-)sql";
-    const auto& res = SqlToYql(stmt);
+        SELECT * FROM Input
+        WITH WATERMARK = ts - Interval("PT1S");
+    )sql");
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"watermark", "WatermarkGenerator"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["watermark"], 1);
+    UNIT_ASSERT_VALUES_EQUAL(stat["WatermarkGenerator"], 0);
+}
+
+Y_UNIT_TEST(TopLevel) {
+    auto res = SqlToYql(R"sql(
+        USE plato;
+
+        $input = SELECT * FROM Input;
+
+        SELECT * FROM $input
+        WITH WATERMARK = ts - Interval("PT1S");
+    )sql");
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"watermark", "WatermarkGenerator"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["watermark"], 0);
+    UNIT_ASSERT_VALUES_EQUAL(stat["WatermarkGenerator"], 1);
+}
+
+Y_UNIT_TEST(Multiple) {
+    auto res = SqlToYql(R"sql(
+        USE plato;
+
+        $input = SELECT * FROM Input
+        WITH WATERMARK = ts - Interval("PT1S");
+
+        $input = SELECT * FROM $input
+        WITH WATERMARK = ts - Interval("PT2S");
+
+        SELECT * FROM $input
+        WITH WATERMARK = ts - Interval("PT3S");
+    )sql");
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"watermark", "WatermarkGenerator"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["watermark"], 1);
+    UNIT_ASSERT_VALUES_EQUAL(stat["WatermarkGenerator"], 2);
+}
+
+Y_UNIT_TEST(NoSuchColumn) {
+    ExpectFailWithError(
+        R"sql(
+            USE plato;
+
+            $input = SELECT xxx FROM Input;
+
+            SELECT * FROM $input
+            WITH WATERMARK = ts - Interval("PT1S");
+        )sql",
+        "<main>:7:30: Error: Column ts is not in source column set\n");
+}
+
+Y_UNIT_TEST(GroupBy) {
+    auto res = SqlToYql(R"sql(
+        USE plato;
+
+        $input = SELECT * FROM Input
+        GROUP BY key, HoppingWindow(ts, "PT1S", "PT2S");
+
+        SELECT * FROM $input
+        WITH WATERMARK = ts - Interval("PT1S");
+    )sql");
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"watermark", "WatermarkGenerator"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["watermark"], 0);
+    UNIT_ASSERT_VALUES_EQUAL(stat["WatermarkGenerator"], 1);
+}
+
+Y_UNIT_TEST(Join) {
+    auto res = SqlToYql(R"sql(
+        USE plato;
+
+        $input = SELECT * FROM Input AS lhs JOIN Input AS rhs ON lhs.ts == rhs.ts;
+
+        SELECT * FROM $input
+        WITH WATERMARK = ts - Interval("PT1S");
+    )sql");
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"watermark", "WatermarkGenerator"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["watermark"], 0);
+    UNIT_ASSERT_VALUES_EQUAL(stat["WatermarkGenerator"], 1);
+}
+
+Y_UNIT_TEST(ParseProtoseq) {
+    auto res = SqlToYql(R"sql(
+        USE plato;
+
+        $input = SELECT Protobuf::Parse(records) AS event FROM Input
+        FLATTEN LIST BY (ChunksSplitters::Protoseq(Data).SplitRecords AS records);
+
+        SELECT * FROM $input
+        WITH WATERMARK = event.ts - Interval("PT1S");
+    )sql");
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"watermark", "WatermarkGenerator"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["watermark"], 0);
+    UNIT_ASSERT_VALUES_EQUAL(stat["WatermarkGenerator"], 1);
+}
+
+Y_UNIT_TEST(ExprList) {
+    auto res = SqlToYql(R"sql(
+        USE plato;
+
+        $input = SELECT * FROM Input;
+
+        SELECT * FROM $input
+        WITH WATERMARK = ("yin", "yang");
+    )sql");
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"watermark", "WatermarkGenerator"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["watermark"], 0);
+    UNIT_ASSERT_VALUES_EQUAL(stat["WatermarkGenerator"], 1);
 }
 } // Y_UNIT_TEST_SUITE(Watermarks)
 
@@ -12520,7 +12884,7 @@ Y_UNIT_TEST(Lambda) {
 
 Y_UNIT_TEST(AtProjection) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 4);
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
             SELECT (SELECT 1);
@@ -12531,7 +12895,7 @@ Y_UNIT_TEST(AtProjection) {
 
 Y_UNIT_TEST(AtExpression) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 4);
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
             SELECT 1 + (SELECT 1);
@@ -12540,9 +12904,167 @@ Y_UNIT_TEST(AtExpression) {
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
 }
 
+Y_UNIT_TEST(AtUnarySubexpr) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        SELECT (SELECT 1)[0];
+        SELECT (SELECT 1)[(SELECT 1)];
+        SELECT (SELECT <| x: 1 |>).x;
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+}
+
+Y_UNIT_TEST(AtCoalesce) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        SELECT (SELECT 1) ?? 2;
+        SELECT 1 ?? (SELECT 2);
+
+        $x = (SELECT * FROM (VALUES (1)) AS x(a)) ?? '';
+
+        DEFINE SUBQUERY $y($x) AS
+            SELECT 1;
+        END DEFINE;
+
+        SELECT * FROM $y($x);
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+}
+
+Y_UNIT_TEST(AtBitwise) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        $a = (SELECT 1) | 1;       SELECT $a;
+        $b = (SELECT 1) & 1;       SELECT $b;
+        $c = (SELECT 1) ^ 1;       SELECT $c;
+        $d = (SELECT 1) << 1;      SELECT $d;
+        $e = (SELECT 1) >> 1;      SELECT $e;
+        $f = 1 | (SELECT 1);       SELECT $f;
+        SELECT (SELECT 1) | 1;
+        SELECT 1 | (SELECT 1);
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+}
+
+Y_UNIT_TEST(AtComparison) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        $a = (SELECT 1) = 1;       SELECT $a;
+        $b = (SELECT 1) <> 1;      SELECT $b;
+        $c = (SELECT 1) == 1;      SELECT $c;
+        $d = (SELECT 1) < 1;       SELECT $d;
+        $e = (SELECT 1) >= 1;      SELECT $e;
+        $f = 1 = (SELECT 1);       SELECT $f;
+        SELECT (SELECT 1) = 1;
+        SELECT 1 = (SELECT 1);
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+}
+
+Y_UNIT_TEST(AtDistinct) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        $a = (SELECT 1) IS DISTINCT FROM 1;         SELECT $a;
+        $b = (SELECT 1) IS NOT DISTINCT FROM 1;     SELECT $b;
+        $c = 1 IS DISTINCT FROM (SELECT 1);         SELECT $c;
+        SELECT (SELECT 1) IS DISTINCT FROM 1;
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+}
+
+Y_UNIT_TEST(AtIn) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        $a = (SELECT 1) IN (1, 2);     SELECT $a;
+        $b = (SELECT 1) NOT IN (1, 2); SELECT $b;
+        SELECT (SELECT 1) IN (1, 2);
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+}
+
+Y_UNIT_TEST(AtIsNull) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        $a = (SELECT 1) IS NULL;       SELECT $a;
+        $b = (SELECT 1) IS NOT NULL;   SELECT $b;
+        SELECT (SELECT 1) IS NULL;
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+}
+
+Y_UNIT_TEST(AtBetween) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        $a = (SELECT 1) BETWEEN 0 AND 2;                 SELECT $a;
+        $b = 1 BETWEEN (SELECT 0) AND (SELECT 2);        SELECT $b;
+        $c = (SELECT 1) NOT BETWEEN 0 AND 2;             SELECT $c;
+        $d = (SELECT 1) BETWEEN SYMMETRIC 2 AND 0;       SELECT $d;
+        SELECT (SELECT 1) BETWEEN 0 AND 2;
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+}
+
+Y_UNIT_TEST(AtLike) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        $a = (SELECT 'a') LIKE 'a';                  SELECT $a;
+        $b = 'a' LIKE (SELECT 'a');                  SELECT $b;
+        $c = (SELECT 'a') REGEXP 'a';                SELECT $c;
+        $d = 'a' REGEXP (SELECT 'a');                SELECT $d;
+        SELECT (SELECT 'a') LIKE 'a';
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+}
+
+Y_UNIT_TEST(AtCase) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        $a = CASE (SELECT 1) WHEN 1 THEN 2 ELSE 3 END;              SELECT $a;
+        $b = CASE WHEN (SELECT 1) = 1 THEN (SELECT 2) ELSE (SELECT 3) END;  SELECT $b;
+        SELECT CASE (SELECT 1) WHEN 1 THEN 2 ELSE 3 END;
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+}
+
+Y_UNIT_TEST(AtNestedOperators) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        $a = ((SELECT 1) | 2) = 3;                   SELECT $a;
+        $b = (SELECT 1) + (SELECT 2) * (SELECT 3);   SELECT $b;
+        $c = NOT ((SELECT 1) = 1);                   SELECT $c;
+        $d = (SELECT 1) ?? (SELECT 2) ?? 3;          SELECT $d;
+        $e = (SELECT 1) = 1 AND (SELECT 2) = 2;      SELECT $e;
+        $f = -(SELECT 1) < ~(SELECT 2);              SELECT $f;
+        SELECT (SELECT 1) BETWEEN (SELECT 0) AND (SELECT 2);
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+}
+
 Y_UNIT_TEST(UnionParenthesis) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 4);
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
             SELECT ( SELECT 1  UNION  SELECT 1);
@@ -12555,7 +13077,7 @@ Y_UNIT_TEST(UnionParenthesis) {
 
 Y_UNIT_TEST(IntersectParenthesis) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 4);
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
             SELECT ( SELECT 1  INTERSECT  SELECT 1);
@@ -12568,7 +13090,7 @@ Y_UNIT_TEST(IntersectParenthesis) {
 
 Y_UNIT_TEST(UnionIntersect) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 4);
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
             SELECT (SELECT 1 UNION     SELECT 1 UNION     SELECT 1);
@@ -12581,7 +13103,7 @@ Y_UNIT_TEST(UnionIntersect) {
 
 Y_UNIT_TEST(ScalarExpressionUnion) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 4);
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
             SELECT ((2 + 2) UNION (2 * 2));
@@ -12594,7 +13116,7 @@ Y_UNIT_TEST(ScalarExpressionUnion) {
 
 Y_UNIT_TEST(OrderByIgnorance1) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 4);
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
             SELECT (SELECT * FROM (SELECT * FROM (SELECT 1 AS x UNION SELECT 2 AS x) ORDER BY x));
@@ -12612,7 +13134,7 @@ Y_UNIT_TEST(OrderByIgnorance1) {
 
 Y_UNIT_TEST(OrderByIgnorance2) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 4);
+    settings.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
             SELECT (SELECT * FROM (SELECT 1 AS x UNION SELECT 2 AS x) ORDER BY x);
@@ -12727,7 +13249,7 @@ Y_UNIT_TEST(LangVerBefore202504) {
 
 Y_UNIT_TEST(InsideLambda) {
     NSQLTranslation::TTranslationSettings s;
-    s.LangVer = NYql::MakeLangVersion(2025, 4);
+    s.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
 
     NYql::TAstParseResult res;
 
@@ -12778,7 +13300,7 @@ Y_UNIT_TEST(InsideLambda) {
 
 Y_UNIT_TEST(ReadsFromJoinSubquery) {
     NSQLTranslation::TTranslationSettings s;
-    s.LangVer = NYql::MakeLangVersion(2025, 4);
+    s.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         SELECT * FROM plato.x JOIN (SELECT * FROM plato.y) AS y ON x.a = y.a;
@@ -12792,7 +13314,7 @@ Y_UNIT_TEST(ReadsFromJoinSubquery) {
 
 Y_UNIT_TEST(ReadsProjectionJoinSubquery) {
     NSQLTranslation::TTranslationSettings s;
-    s.LangVer = NYql::MakeLangVersion(2025, 4);
+    s.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         SELECT (SELECT a FROM plato.x JOIN (SELECT * FROM plato.y) AS y ON x.a = y.a);
@@ -12806,7 +13328,7 @@ Y_UNIT_TEST(ReadsProjectionJoinSubquery) {
 
 Y_UNIT_TEST(ReadsProjectionJoinInSubquery) {
     NSQLTranslation::TTranslationSettings s;
-    s.LangVer = NYql::MakeLangVersion(2025, 4);
+    s.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         SELECT 1 IN (SELECT a FROM plato.x JOIN (SELECT * FROM plato.y) AS y ON x.a = y.a);
@@ -12820,7 +13342,7 @@ Y_UNIT_TEST(ReadsProjectionJoinInSubquery) {
 
 Y_UNIT_TEST(ReadsProjectionJoinExistsSubquery) {
     NSQLTranslation::TTranslationSettings s;
-    s.LangVer = NYql::MakeLangVersion(2025, 4);
+    s.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         SELECT EXISTS (SELECT a FROM plato.x JOIN (SELECT * FROM plato.y) AS y ON x.a = y.a);
@@ -12834,7 +13356,7 @@ Y_UNIT_TEST(ReadsProjectionJoinExistsSubquery) {
 
 Y_UNIT_TEST(ReadsNamedNodeJoinExistsSubquery) {
     NSQLTranslation::TTranslationSettings s;
-    s.LangVer = NYql::MakeLangVersion(2025, 4);
+    s.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         $x = (SELECT a FROM plato.x JOIN (SELECT * FROM plato.y) AS y ON x.a = y.a);
@@ -12849,7 +13371,7 @@ Y_UNIT_TEST(ReadsNamedNodeJoinExistsSubquery) {
 
 Y_UNIT_TEST(ReadsProjectionExpresionSubquery) {
     NSQLTranslation::TTranslationSettings s;
-    s.LangVer = NYql::MakeLangVersion(2025, 4);
+    s.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         SELECT 1 + (SELECT a FROM plato.x);
@@ -12863,7 +13385,7 @@ Y_UNIT_TEST(ReadsProjectionExpresionSubquery) {
 
 Y_UNIT_TEST(ReadsNamedNodeExpresionSubquery) {
     NSQLTranslation::TTranslationSettings s;
-    s.LangVer = NYql::MakeLangVersion(2025, 4);
+    s.LangVer = NYql::NFeature::InlineSubquery.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         $x = 1 + (SELECT a FROM plato.x);
@@ -12913,7 +13435,7 @@ Y_UNIT_TEST(LangVer) {
 
 Y_UNIT_TEST(AutoTopLevel) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'auto';
@@ -12925,7 +13447,7 @@ Y_UNIT_TEST(AutoTopLevel) {
 
 Y_UNIT_TEST(AutoSubquery) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'auto';
@@ -12938,7 +13460,8 @@ Y_UNIT_TEST(AutoSubquery) {
 
 Y_UNIT_TEST(Minimal) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    // TODO: remove YqlSelectLangVersion
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -12953,7 +13476,7 @@ Y_UNIT_TEST(Minimal) {
 
 Y_UNIT_TEST(Expr) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -12974,7 +13497,7 @@ Y_UNIT_TEST(Expr) {
 
 Y_UNIT_TEST(ResultColumnLabel) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -12989,7 +13512,7 @@ Y_UNIT_TEST(ResultColumnLabel) {
 
 Y_UNIT_TEST(Asterisk) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13008,7 +13531,7 @@ Y_UNIT_TEST(Asterisk) {
 
 Y_UNIT_TEST(AsteriskInvalidLeft) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13022,7 +13545,7 @@ Y_UNIT_TEST(AsteriskInvalidLeft) {
 
 Y_UNIT_TEST(AsteriskInvalidRight) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13036,7 +13559,7 @@ Y_UNIT_TEST(AsteriskInvalidRight) {
 
 Y_UNIT_TEST(FromAnonValues) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13055,7 +13578,7 @@ Y_UNIT_TEST(FromAnonValues) {
 
 Y_UNIT_TEST(FromValues) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13076,7 +13599,7 @@ Y_UNIT_TEST(FromValues) {
 
 Y_UNIT_TEST(FromTableWithImmediateCluster) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13096,7 +13619,7 @@ Y_UNIT_TEST(FromTableWithImmediateCluster) {
 
 Y_UNIT_TEST(FromQuotedTableWithImmediateCluster) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13114,9 +13637,72 @@ Y_UNIT_TEST(FromQuotedTableWithImmediateCluster) {
     UNIT_ASSERT_STRING_CONTAINS(program, R"('((Right! yql_read0) '"/Root/Yql/Select" '()))");
 }
 
+Y_UNIT_TEST(FromQuotedTableWithImmediateClusterWithTablePrefixPath) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        USE plato;
+        PRAGMA YqlSelect = 'force';
+        PRAGMA TablePathPrefix = '/Root/Yql';
+        SELECT a, b FROM Select;
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"YqlSelect", "Read!"};
+
+    TString program = VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["YqlSelect"], 1);
+    UNIT_ASSERT_VALUES_EQUAL(stat["Read!"], 1);
+    UNIT_ASSERT_STRING_CONTAINS(program, R"((Key '('table (String '"/Root/Yql/Select"))) (Void) '()))");
+}
+
+Y_UNIT_TEST(FromNamedNodeWithQuotedTableWithImmediateClusterWithTablePrefixPath) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        USE plato;
+        PRAGMA YqlSelect = 'force';
+        PRAGMA TablePathPrefix = '/Root/Yql';
+        $x = SELECT a FROM Select;
+        SELECT $x;
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"YqlSelect", "Read!"};
+    TString program = VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["YqlSelect"], 3);
+    UNIT_ASSERT_VALUES_EQUAL(stat["Read!"], 1);
+    UNIT_ASSERT_STRING_CONTAINS(program, R"((Key '('table (String '"/Root/Yql/Select"))) (Void) '()))");
+}
+
+// The test checks that the prefix is not added for temporary tables.
+Y_UNIT_TEST(FromTmpTableWithImmediateClusterWithTablePrefixPath) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        USE plato;
+        PRAGMA YqlSelect = 'force';
+        PRAGMA TablePathPrefix = '/Root';
+        INSERT INTO @tmp (a) VALUES (1);
+        COMMIT;
+        SELECT a FROM @tmp;
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"YqlSelect", "Read!", "TempTable"};
+    TString program = VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["YqlSelect"], 1);
+    UNIT_ASSERT_VALUES_EQUAL(stat["Read!"], 1);
+    UNIT_ASSERT_VALUES_EQUAL(stat["TempTable"], 2);
+    UNIT_ASSERT_STRING_CONTAINS(program, R"(TempTable '"tmp")");
+}
+
 Y_UNIT_TEST(FromTmpTableWithImmediateCluster) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13135,7 +13721,7 @@ Y_UNIT_TEST(FromTmpTableWithImmediateCluster) {
 
 Y_UNIT_TEST(Where) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13154,7 +13740,7 @@ Y_UNIT_TEST(Where) {
 
 Y_UNIT_TEST(FromSubquery) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13171,7 +13757,7 @@ Y_UNIT_TEST(FromSubquery) {
 
 Y_UNIT_TEST(Join2) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13181,24 +13767,9 @@ Y_UNIT_TEST(Join2) {
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
 }
 
-Y_UNIT_TEST(AsteriskJoin) {
-    NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
-
-    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
-        PRAGMA YqlSelect = 'force';
-        USE plato;
-        SELECT * FROM xx JOIN yy ON xx.id = yy.id;
-    )sql", settings);
-    UNIT_ASSERT(!res.IsOk());
-    UNIT_ASSERT_STRING_CONTAINS(
-        Err2Str(res),
-        "YqlSelect unsupported: JOIN with an asterisk projection");
-}
-
 Y_UNIT_TEST(QualifiedAsteriskJoin) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13213,7 +13784,7 @@ Y_UNIT_TEST(QualifiedAsteriskJoin) {
 
 Y_UNIT_TEST(Join2Alias) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13227,7 +13798,7 @@ Y_UNIT_TEST(Join2Alias) {
 
 Y_UNIT_TEST(Join3) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13242,7 +13813,7 @@ Y_UNIT_TEST(Join3) {
 
 Y_UNIT_TEST(Join3Mix) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13257,7 +13828,7 @@ Y_UNIT_TEST(Join3Mix) {
 
 Y_UNIT_TEST(ImplicitCrossIsDisabled) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13271,7 +13842,7 @@ Y_UNIT_TEST(ImplicitCrossIsDisabled) {
 
 Y_UNIT_TEST(ImplicitCrossJoin2) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13283,7 +13854,7 @@ Y_UNIT_TEST(ImplicitCrossJoin2) {
 
 Y_UNIT_TEST(ImplicitCrossJoin3) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13295,7 +13866,7 @@ Y_UNIT_TEST(ImplicitCrossJoin3) {
 
 Y_UNIT_TEST(ImplicitCrossJoinAndExplicitJoin) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13309,7 +13880,7 @@ Y_UNIT_TEST(ImplicitCrossJoinAndExplicitJoin) {
 
 Y_UNIT_TEST(ImplicitCrossJoinColumnName) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13328,7 +13899,7 @@ Y_UNIT_TEST(ImplicitCrossJoinColumnName) {
 
 Y_UNIT_TEST(ImplicitCrossJoinColumnNameRename) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13347,7 +13918,7 @@ Y_UNIT_TEST(ImplicitCrossJoinColumnNameRename) {
 
 Y_UNIT_TEST(ExplicitCrossJoin) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13358,7 +13929,7 @@ Y_UNIT_TEST(ExplicitCrossJoin) {
 
 Y_UNIT_TEST(LeftRightOuterJoin) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13372,7 +13943,7 @@ Y_UNIT_TEST(LeftRightOuterJoin) {
 
 Y_UNIT_TEST(OrderBy) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13385,7 +13956,7 @@ Y_UNIT_TEST(OrderBy) {
 
 Y_UNIT_TEST(LimitOffset) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13396,7 +13967,7 @@ Y_UNIT_TEST(LimitOffset) {
 
 Y_UNIT_TEST(CorrelatedProjection) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13407,7 +13978,7 @@ Y_UNIT_TEST(CorrelatedProjection) {
 
 Y_UNIT_TEST(InSubqueryProjection) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13419,7 +13990,7 @@ Y_UNIT_TEST(InSubqueryProjection) {
 
 Y_UNIT_TEST(InSubqueryWhere) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13433,7 +14004,7 @@ Y_UNIT_TEST(InSubqueryWhere) {
 
 Y_UNIT_TEST(ExistsSubqueryWhere) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13455,7 +14026,7 @@ Y_UNIT_TEST(ExistsSubqueryWhere) {
 
 Y_UNIT_TEST(GroupByUnsupportsTwoArg) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13466,7 +14037,7 @@ Y_UNIT_TEST(GroupByUnsupportsTwoArg) {
 
 Y_UNIT_TEST(GroupByCountImplicit) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13483,7 +14054,7 @@ Y_UNIT_TEST(GroupByCountImplicit) {
 
 Y_UNIT_TEST(GroupByCount) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13501,7 +14072,7 @@ Y_UNIT_TEST(GroupByCount) {
 
 Y_UNIT_TEST(GroupByCountAll) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13519,7 +14090,7 @@ Y_UNIT_TEST(GroupByCountAll) {
 
 Y_UNIT_TEST(GroupByMinOrMax) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13538,7 +14109,7 @@ Y_UNIT_TEST(GroupByMinOrMax) {
 
 Y_UNIT_TEST(GroupBySum) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13556,7 +14127,7 @@ Y_UNIT_TEST(GroupBySum) {
 
 Y_UNIT_TEST(GroupByAvg) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13574,7 +14145,7 @@ Y_UNIT_TEST(GroupByAvg) {
 
 Y_UNIT_TEST(GroupByExplicitWithHaving) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13593,7 +14164,7 @@ Y_UNIT_TEST(GroupByExplicitWithHaving) {
 
 Y_UNIT_TEST(GroupByImplicitWithHaving) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13611,7 +14182,7 @@ Y_UNIT_TEST(GroupByImplicitWithHaving) {
 
 Y_UNIT_TEST(GroupByDistinctArgument) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13628,7 +14199,7 @@ Y_UNIT_TEST(GroupByDistinctArgument) {
 
 Y_UNIT_TEST(AutoGroupByCompactHint) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'auto';
@@ -13645,7 +14216,7 @@ Y_UNIT_TEST(AutoGroupByCompactHint) {
 
 Y_UNIT_TEST(GroupByExprAliasUnsupported) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13658,7 +14229,7 @@ Y_UNIT_TEST(GroupByExprAliasUnsupported) {
 
 Y_UNIT_TEST(GroupByExprUnnamed) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13671,7 +14242,7 @@ Y_UNIT_TEST(GroupByExprUnnamed) {
 
 Y_UNIT_TEST(GroupByExprAllowUnnamed) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13683,7 +14254,7 @@ Y_UNIT_TEST(GroupByExprAllowUnnamed) {
 
 Y_UNIT_TEST(LegacyGroupByExprAllowUnnamed) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelectAllowUnnamedGroupByExpr;
@@ -13696,7 +14267,7 @@ Y_UNIT_TEST(LegacyGroupByExprAllowUnnamed) {
 
 Y_UNIT_TEST(GroupByGroupingSetsOneColumn) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13711,7 +14282,7 @@ Y_UNIT_TEST(GroupByGroupingSetsOneColumn) {
 
 Y_UNIT_TEST(GroupByGroupingSetsTwoColumn) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13726,7 +14297,7 @@ Y_UNIT_TEST(GroupByGroupingSetsTwoColumn) {
 
 Y_UNIT_TEST(GroupByGroupingSetsOneEmptyTuple) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13741,7 +14312,7 @@ Y_UNIT_TEST(GroupByGroupingSetsOneEmptyTuple) {
 
 Y_UNIT_TEST(GroupByGroupingSetsOneTuple1) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13756,7 +14327,7 @@ Y_UNIT_TEST(GroupByGroupingSetsOneTuple1) {
 
 Y_UNIT_TEST(GroupByGroupingSetsTwoTuple1) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13771,7 +14342,7 @@ Y_UNIT_TEST(GroupByGroupingSetsTwoTuple1) {
 
 Y_UNIT_TEST(GroupByGroupingSetsOneTuple2) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13787,7 +14358,7 @@ Y_UNIT_TEST(GroupByGroupingSetsOneTuple2) {
 
 Y_UNIT_TEST(GroupByGroupingSetsOneExpr) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13803,7 +14374,7 @@ Y_UNIT_TEST(GroupByGroupingSetsOneExpr) {
 
 Y_UNIT_TEST(GroupByGroupingSetsNestedSpecUnsupported) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13816,7 +14387,7 @@ Y_UNIT_TEST(GroupByGroupingSetsNestedSpecUnsupported) {
 
 Y_UNIT_TEST(GroupByHopUnsupported) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13829,7 +14400,7 @@ Y_UNIT_TEST(GroupByHopUnsupported) {
 
 Y_UNIT_TEST(GroupByRollup) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13845,7 +14416,7 @@ Y_UNIT_TEST(GroupByRollup) {
 
 Y_UNIT_TEST(GroupByRollupSublists) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13858,7 +14429,7 @@ Y_UNIT_TEST(GroupByRollupSublists) {
 
 Y_UNIT_TEST(GroupByCube) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13874,7 +14445,7 @@ Y_UNIT_TEST(GroupByCube) {
 
 Y_UNIT_TEST(GroupByCubeSublists) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13887,7 +14458,7 @@ Y_UNIT_TEST(GroupByCubeSublists) {
 
 Y_UNIT_TEST(GroupByMixedSpecs) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13911,7 +14482,7 @@ Y_UNIT_TEST(GroupByMixedSpecs) {
 
 Y_UNIT_TEST(DiagnosticMandatoryAsColumn) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13924,7 +14495,7 @@ Y_UNIT_TEST(DiagnosticMandatoryAsColumn) {
 
 Y_UNIT_TEST(DiagnosticMandatoryAsTable) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13937,7 +14508,7 @@ Y_UNIT_TEST(DiagnosticMandatoryAsTable) {
 
 Y_UNIT_TEST(NamedNodeSubqueryScalar) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13955,7 +14526,7 @@ Y_UNIT_TEST(NamedNodeSubqueryScalar) {
 
 Y_UNIT_TEST(NamedNodeSubqueryIn) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13973,7 +14544,7 @@ Y_UNIT_TEST(NamedNodeSubqueryIn) {
 
 Y_UNIT_TEST(NamedNodeSubqueryExists) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -13988,7 +14559,7 @@ Y_UNIT_TEST(NamedNodeSubqueryExists) {
 
 Y_UNIT_TEST(NamedNodeSubquerySource) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -14007,7 +14578,7 @@ Y_UNIT_TEST(NamedNodeSubquerySource) {
 
 Y_UNIT_TEST(NamedNodeSubqueryReuse) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -14025,7 +14596,7 @@ Y_UNIT_TEST(NamedNodeSubqueryReuse) {
 
 Y_UNIT_TEST(SelectOpUnion) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -14042,7 +14613,7 @@ Y_UNIT_TEST(SelectOpUnion) {
 
 Y_UNIT_TEST(SelectOpExcept) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -14059,7 +14630,7 @@ Y_UNIT_TEST(SelectOpExcept) {
 
 Y_UNIT_TEST(SelectOpIntersect) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -14076,7 +14647,7 @@ Y_UNIT_TEST(SelectOpIntersect) {
 
 Y_UNIT_TEST(SelectOpUnionSubquery) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -14092,7 +14663,7 @@ Y_UNIT_TEST(SelectOpUnionSubquery) {
 
 Y_UNIT_TEST(SelectOpUnionSubqueryParenthesis) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res;
 
@@ -14131,7 +14702,7 @@ Y_UNIT_TEST(TopLevelHintIsNotAvailable) {
 
 Y_UNIT_TEST(TopLevelHintBadArgumentWarning) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         SELECT /*+ yqlselect(xxx) */ 1;
@@ -14142,7 +14713,7 @@ Y_UNIT_TEST(TopLevelHintBadArgumentWarning) {
 
 Y_UNIT_TEST(TopLevelHintShadow) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         SELECT /*+ yqlselect(disable) yqlselect(force) */ 1;
@@ -14157,7 +14728,7 @@ Y_UNIT_TEST(TopLevelHintShadow) {
 
 Y_UNIT_TEST(TopLevelHintStatements) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         SELECT /*+ yqlselect(disable) */ 1;
@@ -14173,7 +14744,7 @@ Y_UNIT_TEST(TopLevelHintStatements) {
 
 Y_UNIT_TEST(TopLevelHintBeatsPragmaDisable) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'disable';
@@ -14190,7 +14761,7 @@ Y_UNIT_TEST(TopLevelHintBeatsPragmaDisable) {
 
 Y_UNIT_TEST(TopLevelHintBeatsPragmaAuto) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'auto';
@@ -14214,7 +14785,7 @@ Y_UNIT_TEST(TopLevelHintBeatsPragmaAuto) {
 
 Y_UNIT_TEST(TopLevelHintStrangeOnUnionFirstDefining) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         SELECT /*+ yqlselect(force) */ 1 AS x
@@ -14231,7 +14802,7 @@ Y_UNIT_TEST(TopLevelHintStrangeOnUnionFirstDefining) {
 
 Y_UNIT_TEST(TopLevelHintStrangeOnUnionSecondIgnored) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         SELECT 1 AS x
@@ -14249,7 +14820,7 @@ Y_UNIT_TEST(TopLevelHintStrangeOnUnionSecondIgnored) {
 
 Y_UNIT_TEST(TopLevelHintStrangeOnUnionFirstInParensDefining) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         (SELECT /*+ yqlselect(force) */ 1 AS x)
@@ -14266,7 +14837,7 @@ Y_UNIT_TEST(TopLevelHintStrangeOnUnionFirstInParensDefining) {
 
 Y_UNIT_TEST(TopLevelHintStrangeOnUnionSecondInParensIgnored) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         (SELECT 1 AS x)
@@ -14284,7 +14855,7 @@ Y_UNIT_TEST(TopLevelHintStrangeOnUnionSecondInParensIgnored) {
 
 Y_UNIT_TEST(QuotedAtoms) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         PRAGMA YqlSelect = 'force';
@@ -14305,7 +14876,7 @@ Y_UNIT_TEST(QuotedAtoms) {
 
 Y_UNIT_TEST(PriorityFieldOverNothing) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14320,7 +14891,7 @@ Y_UNIT_TEST(PriorityFieldOverNothing) {
 
 Y_UNIT_TEST(PriorityFlagOverField) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Disable;
     settings.Flags.insert("AutoYqlSelect");
 
@@ -14336,7 +14907,7 @@ Y_UNIT_TEST(PriorityFlagOverField) {
 
 Y_UNIT_TEST(PriorityPragmaOverField) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14352,7 +14923,7 @@ Y_UNIT_TEST(PriorityPragmaOverField) {
 
 Y_UNIT_TEST(WindowSmoke) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14379,7 +14950,7 @@ Y_UNIT_TEST(WindowSmoke) {
 
 Y_UNIT_TEST(WindowFrameRowsUnboundedPreceding) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14397,7 +14968,7 @@ Y_UNIT_TEST(WindowFrameRowsUnboundedPreceding) {
 
 Y_UNIT_TEST(WindowFrameRangeUnboundedPreceding) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14415,7 +14986,7 @@ Y_UNIT_TEST(WindowFrameRangeUnboundedPreceding) {
 
 Y_UNIT_TEST(WindowFrameGroupsUnboundedPreceding) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14433,7 +15004,7 @@ Y_UNIT_TEST(WindowFrameGroupsUnboundedPreceding) {
 
 Y_UNIT_TEST(WindowFrameRows1Preceding) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14452,7 +15023,7 @@ Y_UNIT_TEST(WindowFrameRows1Preceding) {
 
 Y_UNIT_TEST(WindowFrameRowsBetweenUnboundedPrecedingAndUnboundedFollowing) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14470,7 +15041,7 @@ Y_UNIT_TEST(WindowFrameRowsBetweenUnboundedPrecedingAndUnboundedFollowing) {
 
 Y_UNIT_TEST(WindowFrameRowsBetweenUnboundedPrecedingAndCurrentRow) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14488,7 +15059,7 @@ Y_UNIT_TEST(WindowFrameRowsBetweenUnboundedPrecedingAndCurrentRow) {
 
 Y_UNIT_TEST(WindowFrameRowsBetween1PrecedingAnd1Following) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14508,7 +15079,7 @@ Y_UNIT_TEST(WindowFrameRowsBetween1PrecedingAnd1Following) {
 
 Y_UNIT_TEST(WindowFrameRowsBetween2PrecedingAnd1Preceding) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14528,7 +15099,7 @@ Y_UNIT_TEST(WindowFrameRowsBetween2PrecedingAnd1Preceding) {
 
 Y_UNIT_TEST(WindowFrameRowsBetweenCurrentRowAnd2Following) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14547,7 +15118,7 @@ Y_UNIT_TEST(WindowFrameRowsBetweenCurrentRowAnd2Following) {
 
 Y_UNIT_TEST(WindowFrameRowsBetweenCurrentRowAndCurrentRow) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14565,7 +15136,7 @@ Y_UNIT_TEST(WindowFrameRowsBetweenCurrentRowAndCurrentRow) {
 
 Y_UNIT_TEST(WindowFrameRangeBetween1PrecedingAnd1Following) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14585,7 +15156,7 @@ Y_UNIT_TEST(WindowFrameRangeBetween1PrecedingAnd1Following) {
 
 Y_UNIT_TEST(WindowFrameRangeBetweenIntervalPrecedingAndFollowing) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14605,7 +15176,7 @@ Y_UNIT_TEST(WindowFrameRangeBetweenIntervalPrecedingAndFollowing) {
 
 Y_UNIT_TEST(WindowFrameGroupsBetween1PrecedingAnd1Following) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14625,7 +15196,7 @@ Y_UNIT_TEST(WindowFrameGroupsBetween1PrecedingAnd1Following) {
 
 Y_UNIT_TEST(WindowFrameRowsBetweenUnboundedPrecedingAndCurrentRowExcludeCurrentRow) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14636,7 +15207,7 @@ Y_UNIT_TEST(WindowFrameRowsBetweenUnboundedPrecedingAndCurrentRowExcludeCurrentR
 
 Y_UNIT_TEST(WindowBad) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NSQLTranslationV1::YqlSelectLangVersion();
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
     settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
@@ -14646,7 +15217,387 @@ Y_UNIT_TEST(WindowBad) {
     UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), ":2:27: Error: Expected a YqlSelect-compatible window function, but got Length");
 }
 
+Y_UNIT_TEST(AnsiCurrentRow) {
+    const auto check = [](TString spec, TString a, TString b, TString c, THashSet<TString> flags) {
+        TString query = R"sql(
+            PRAGMA YqlSelect = 'force';
+            $events = (SELECT * FROM (VALUES
+                (1, 10,  5),
+                (2, 10,  5),
+                (3, 20, 10)
+            ) AS events (event_id, ts, val));
+            SELECT ts, val, SUM(val) OVER (SPEC) AS run_sum FROM $events ORDER BY ts, event_id;
+        )sql";
+        SubstGlobal(query, "SPEC", spec);
+
+        NSQLTranslation::TTranslationSettings settings;
+        settings.Flags = std::move(flags);
+        settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+
+        NYql::TAstParseResult res = SqlToYqlWithSettings(query, settings);
+        UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+        TWordCountHive stat = {"YqlSelect"};
+        TString program = VerifyProgram(res, stat);
+        UNIT_ASSERT_VALUES_EQUAL(stat["YqlSelect"], 4);
+        UNIT_ASSERT_STRING_CONTAINS(program, "'('type '" + a + ")");
+        UNIT_ASSERT_STRING_CONTAINS(program, "'('from '" + b + ")");
+        UNIT_ASSERT_STRING_CONTAINS(program, "'('to '" + c + ")");
+    };
+
+    check("ORDER BY ts", "rows", "up", "f", {}); // to_value is 0
+    check("", /*      */ "rows", "up", "uf", {});
+    check("ORDER BY ts", "range", "up", "c", {"AnsiCurrentRow"});
+    check("", /*      */ "rows", "up", "uf", {"AnsiCurrentRow"});
+}
+
+Y_UNIT_TEST(PragmaSupported) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        PRAGMA YqlSelect = 'force';
+        PRAGMA AnsiCurrentRow;
+        SELECT 1;
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+}
+
+Y_UNIT_TEST(PragmaUnsupported) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        PRAGMA YqlSelect = 'force';
+        PRAGMA SimpleColumns;
+        SELECT 1;
+    )sql", settings);
+    UNIT_ASSERT(!res.IsOk());
+    UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), "YqlSelect unsupported: Pragma 'simplecolumns'");
+}
+
+Y_UNIT_TEST(PragmaUnsupportedBefore) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        PRAGMA SimpleColumns;
+        PRAGMA YqlSelect = 'force';
+        SELECT 1;
+    )sql", settings);
+    UNIT_ASSERT(!res.IsOk());
+    UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), "YqlSelect unsupported: Pragma 'simplecolumns'");
+}
+
+Y_UNIT_TEST(PragmaUnsupportedAuto) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+
+    NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
+        PRAGMA YqlSelect = 'auto';
+        PRAGMA SimpleColumns;
+        SELECT 1;
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"YqlSelect"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["YqlSelect"], 0);
+}
+
 } // Y_UNIT_TEST_SUITE(YqlSelect)
+
+Y_UNIT_TEST_SUITE(YqlSelectWithCTE) {
+
+void Parse(TString query) {
+    NYql::TAstParseResult r = SqlToYql(query);
+    TString e = Err2Str(r);
+    UNIT_ASSERT_C(!e.contains("Fatal"), e);
+    UNIT_ASSERT_C(!e.contains("ambiguity"), e);
+    UNIT_ASSERT_C(!e.contains("extraneous input"), e);
+    UNIT_ASSERT_C(!e.contains("mismatched input"), e);
+}
+
+Y_UNIT_TEST(NoSyntaxAmbiguity) {
+    Parse(R"sql(
+        WITH x AS (SELECT 1) SELECT * FROM x;
+    )sql");
+    Parse(R"sql(
+        WITH x AS (VALUES (1)) SELECT * FROM x;
+    )sql");
+    Parse(R"sql(
+        WITH x AS (SELECT 1), y AS (SELECT 1) SELECT * FROM x, y;
+    )sql");
+    Parse(R"sql(
+        WITH x(a) AS (SELECT 1) SELECT * FROM x, y;
+    )sql");
+    Parse(R"sql(
+        WITH x(a,b) AS (SELECT 1) SELECT * FROM x, y;
+    )sql");
+    Parse(R"sql(
+        WITH
+            RECURSIVE a(n) AS (
+                SELECT 1
+                UNION ALL
+                SELECT n + 1 FROM a
+                WHERE n < 5
+            ),
+            RECURSIVE b(n) AS (
+                SELECT 1
+                UNION ALL
+                SELECT n + 1 FROM b
+                WHERE n < 5
+            )
+        SELECT * FROM a UNION SELECT * FROM b;
+    )sql");
+    Parse(R"sql(
+        WITH x AS (SELECT 1), SELECT * FROM x;
+        WITH x AS (SELECT 1), y AS (SELECT 1), SELECT * FROM x, y;
+    )sql");
+    Parse(R"sql(
+        $x =
+            WITH RECURSIVE a(n) AS (
+                SELECT 1
+                UNION ALL
+                SELECT n + 1 FROM a
+                WHERE n < 5
+            )
+            SELECT * FROM a UNION SELECT * FROM b
+        ;
+    )sql");
+    Parse(R"sql(
+        $x = (
+            WITH RECURSIVE a(n) AS (
+                SELECT 1
+                UNION ALL
+                SELECT n + 1 FROM a
+                WHERE n < 5
+            )
+            SELECT * FROM a UNION SELECT * FROM b
+        );
+    )sql");
+    Parse(R"sql(
+        SELECT (
+            WITH RECURSIVE a(n) AS (
+                SELECT 1
+                UNION ALL
+                SELECT n + 1 FROM a
+                WHERE n < 5
+            )
+            SELECT * FROM a UNION SELECT * FROM b
+        );
+    )sql");
+    Parse(R"sql(
+        INSERT INTO x (b)
+        WITH RECURSIVE a(n) AS (
+            SELECT 1
+            UNION ALL
+            SELECT n + 1 FROM a
+            WHERE n < 5
+        )
+        SELECT * FROM a;
+    )sql");
+}
+
+Y_UNIT_TEST(LinearVisibilityOK) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+    settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
+
+    auto res = SqlToYqlWithSettings(R"sql(
+        WITH
+            x AS (SELECT 0 + 1 AS a       ),
+            y AS (SELECT a + 1 AS a FROM x),
+        SELECT * FROM y;
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+
+    TWordCountHive stat = {"YqlSelect"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["YqlSelect"], 3);
+}
+
+Y_UNIT_TEST(LinearVisibilityErr) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+    settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
+
+    auto res = SqlToYqlWithSettings(R"sql(
+        WITH
+            y AS (SELECT a + 1 AS a FROM x),
+            x AS (SELECT 0 + 1 AS a       )
+        SELECT * FROM y;
+    )sql", settings);
+    UNIT_ASSERT(!res.IsOk());
+    UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), ":3:42: Error: No cluster name given");
+    UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), "If 'x' is meant to be a CTE");
+}
+
+Y_UNIT_TEST(UnusedCTETrivial) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+    settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
+
+    auto res = SqlToYqlWithSettings(R"sql(
+        WITH x AS (SELECT 1) SELECT 1;
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+    UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), ":2:14: Warning: CTE Symbol x is not used");
+}
+
+Y_UNIT_TEST(UnusedCTEUnwinding) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+    settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
+
+    auto res = SqlToYqlWithSettings(R"sql(
+        WITH x AS (
+            WITH y AS (
+                WITH z AS (
+                    SELECT 1)
+                SELECT 1)
+            SELECT 1)
+        SELECT 1;
+    )sql", settings);
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+    UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), ":2:14: Warning: CTE Symbol x is not used");
+    UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), ":3:18: Warning: CTE Symbol y is not used");
+    UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), ":4:22: Warning: CTE Symbol z is not used");
+}
+
+Y_UNIT_TEST(ScopeErr) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+    settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
+
+    auto res = SqlToYqlWithSettings(R"sql(
+        WITH
+            y AS (
+                WITH x AS (
+                    SELECT 0 + 1 AS a
+                )
+                SELECT a + 1 AS a FROM x
+            ),
+            z AS (
+                SELECT a + 2 AS a FROM x
+            )
+        SELECT a + 3 AS a FROM z;
+    )sql", settings);
+    UNIT_ASSERT(!res.IsOk());
+    UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), ":10:40: Error: No cluster name given");
+    UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), "If 'x' is meant to be a CTE");
+}
+
+Y_UNIT_TEST(OnlySelectAllowed) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+    settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
+
+    auto res = SqlToYqlWithSettings(R"sql(
+        SELECT (WITH a AS (SELECT 1) 123);
+    )sql", settings);
+    UNIT_ASSERT(!res.IsOk());
+    UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), ":2:17: Error: A WITH clause can only be used before a SELECT statement");
+}
+
+Y_UNIT_TEST(Redefinition) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+    settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
+
+    auto res = SqlToYqlWithSettings(R"sql(
+        WITH
+            x AS (SELECT 0 + 1 AS a       ),
+            x AS (SELECT a + 1 AS a FROM x),
+            x AS (SELECT a + 1 AS a FROM x),
+        SELECT * FROM x;
+    )sql", settings);
+    UNIT_ASSERT(!res.IsOk());
+    UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), ":4:13: Error: Bad CTE: Redefinition is forbidden: x");
+}
+
+Y_UNIT_TEST(RecursiveReferenceFromRecursive) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+    settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
+
+    auto res = SqlToYqlWithSettings(R"sql(
+        WITH RECURSIVE a AS (
+            WITH RECURSIVE b AS (
+                SELECT 1 AS n
+                UNION ALL
+                SELECT n + 1 AS n FROM a
+                WHERE n < 5
+            )
+            SELECT * FROM b
+        )
+        SELECT * FROM a;
+    )sql", settings);
+    UNIT_ASSERT(!res.IsOk());
+    UNIT_ASSERT_STRING_CONTAINS(
+        Err2Str(res),
+        ":6:40: Error: Can't reference outer RECURSIVE CTE 'a'. "
+        "Recursion only with a current CTE is allowed, which is 'b' here");
+}
+
+Y_UNIT_TEST(RecursiveReferenceFromSubquery) {
+    NSQLTranslation::TTranslationSettings settings;
+    settings.LangVer = NYql::NFeature::YqlSelect.MinLangVer;
+    settings.YqlSelect = NSQLTranslation::EYqlSelect::Force;
+
+    const auto test = [&](TString query, TString position, TString target, TString current) {
+        auto res = SqlToYqlWithSettings(query, settings);
+        UNIT_ASSERT(!res.IsOk());
+        UNIT_ASSERT_STRING_CONTAINS(
+            Err2Str(res),
+            TStringBuilder()
+                << position << ": "
+                << "Error: Can't reference outer RECURSIVE CTE '" << target << "'. "
+                << "Recursion only with a current CTE is allowed, which is " << current << " here");
+    };
+
+    test(R"sql(
+        WITH RECURSIVE a AS (
+            SELECT 1 AS n
+            UNION ALL
+            SELECT n + 1 AS n FROM (SELECT * FROM a)
+            WHERE n < 5
+        )
+        SELECT * FROM a;
+    )sql", ":5:51", "a", "undefined");
+
+    test(R"sql(
+        WITH RECURSIVE a AS (
+            SELECT 1 AS n
+            UNION ALL
+            SELECT (SELECT n + 1 FROM a) AS n FROM a
+            WHERE n < 5
+        )
+        SELECT * FROM a;
+    )sql", ":5:39", "a", "undefined");
+
+    test(R"sql(
+        WITH RECURSIVE a AS (
+            SELECT 1 AS n
+            UNION ALL
+            SELECT EXISTS (SELECT n + 1 FROM a) AS n FROM a
+            WHERE n < 5
+        )
+        SELECT * FROM a;
+    )sql", ":5:46", "a", "undefined");
+
+    test(R"sql(
+        WITH RECURSIVE a AS (
+            SELECT 1 AS n
+            UNION ALL
+            SELECT 1 IN (SELECT n + 1 FROM a) AS n FROM a
+            WHERE n < 5
+        )
+        SELECT * FROM a;
+    )sql", ":5:44", "a", "undefined");
+}
+
+} // Y_UNIT_TEST_SUITE(YqlSelectWithCTE)
 
 Y_UNIT_TEST_SUITE(ColumnDefault) {
 
@@ -14897,7 +15848,7 @@ Y_UNIT_TEST(DoesntWorkOnOldLangVersion) {
 
 Y_UNIT_TEST(Basic) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 5);
+    settings.LangVer = NYql::NFeature::YtCreateView.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         CREATE VIEW plato.foo AS
@@ -14920,7 +15871,7 @@ Y_UNIT_TEST(Basic) {
 
 Y_UNIT_TEST(NamedNodesAreNotVisibleInView) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 5);
+    settings.LangVer = NYql::NFeature::YtCreateView.MinLangVer;
 
     auto query = R"sql(
         $foo = 1;
@@ -14936,7 +15887,7 @@ Y_UNIT_TEST(NamedNodesAreNotVisibleInView) {
 
 Y_UNIT_TEST(ScopedPragmasDoNotAffectView) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 5);
+    settings.LangVer = NYql::NFeature::YtCreateView.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings(R"sql(
         pragma CheckedOps = 'true';
@@ -14957,7 +15908,7 @@ Y_UNIT_TEST(ScopedPragmasDoNotAffectView) {
 
 Y_UNIT_TEST(NewSyntaxDoesntWorkOnYdb) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 5);
+    settings.LangVer = NYql::NFeature::YtCreateView.MinLangVer;
     ExpectFailWithError("create view ydb.foo as do begin select 1; end do",
                         "<main>:1:1: Error: CREATE VIEW ... AS DO BEGIN ... END DO syntax is not supported for ydb provider. Please use CREATE VIEW ... AS SELECT\n",
                         settings);
@@ -14965,7 +15916,7 @@ Y_UNIT_TEST(NewSyntaxDoesntWorkOnYdb) {
 
 Y_UNIT_TEST(OldSyntaxDoesntWorkOnYt) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 5);
+    settings.LangVer = NYql::NFeature::YtCreateView.MinLangVer;
     ExpectFailWithError("create view plato.foo as select 1;",
                         "<main>:1:1: Error: CREATE VIEW ... AS SELECT syntax is not supported for yt provider. Please use CREATE VIEW ... AS DO BEGIN ... END DO\n",
                         settings);
@@ -14973,14 +15924,14 @@ Y_UNIT_TEST(OldSyntaxDoesntWorkOnYt) {
 
 Y_UNIT_TEST(EmptyViewBody) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 5);
+    settings.LangVer = NYql::NFeature::YtCreateView.MinLangVer;
     ExpectFailWithError("create view plato.foo as do begin end do", "<main>:1:29: Error: Empty view body is not allowed\n", settings);
     ExpectFailWithError("create view plato.foo as do begin /*comment*/;; end do", "<main>:1:29: Error: Empty view body is not allowed\n", settings);
 }
 
 Y_UNIT_TEST(MultiSelectsInViewOrStatementAfterSelect) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 5);
+    settings.LangVer = NYql::NFeature::YtCreateView.MinLangVer;
     ExpectFailWithError("create view plato.foo as do begin select 1; select 2; end do",
                         "<main>:1:52: Error: Strictly one select/process/reduce statement is expected at the end of subquery\n", settings);
     ExpectFailWithError("create view plato.foo as do begin select 1;   $foo = 2; end do",
@@ -15003,7 +15954,7 @@ Y_UNIT_TEST(ErrorOnTempView) {
 
 Y_UNIT_TEST(CreateViewIfNotExists) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 5);
+    settings.LangVer = NYql::NFeature::YtCreateView.MinLangVer;
 
     NYql::TAstParseResult res = SqlToYqlWithSettings("create view if not exists plato.foo as do begin select 1; end do", settings);
     UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
@@ -15022,7 +15973,7 @@ Y_UNIT_TEST(CreateViewIfNotExists) {
 
 Y_UNIT_TEST(CreateDropViewWithBind) {
     NSQLTranslation::TTranslationSettings settings;
-    settings.LangVer = NYql::MakeLangVersion(2025, 5);
+    settings.LangVer = NYql::NFeature::YtCreateView.MinLangVer;
 
     auto verify = [&](const TString& q) {
         TString header = R"sql(
@@ -15052,5 +16003,35 @@ Y_UNIT_TEST(CreateDropViewWithBind) {
 }
 
 } // Y_UNIT_TEST_SUITE(CreateViewNewSyntax)
+
+Y_UNIT_TEST_SUITE(NullAsTypeName) {
+
+Y_UNIT_TEST(ListOfNull) {
+    NYql::TAstParseResult res = SqlToYql("select List<NULL>;");
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+    TWordCountHive stat = {"ListType", "NullType"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["ListType"], 1);
+    UNIT_ASSERT_VALUES_EQUAL(stat["NullType"], 1);
+}
+
+Y_UNIT_TEST(CastAsNull) {
+    NYql::TAstParseResult res = SqlToYql("select cast(1 as NULL);");
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+    TWordCountHive stat = {"NullType"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["NullType"], 1);
+}
+
+Y_UNIT_TEST(OptionalNull) {
+    NYql::TAstParseResult res = SqlToYql("select cast(1 as NULL?);");
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+    TWordCountHive stat = {"NullType", "OptionalType"};
+    VerifyProgram(res, stat);
+    UNIT_ASSERT_VALUES_EQUAL(stat["NullType"], 1);
+    UNIT_ASSERT_VALUES_EQUAL(stat["OptionalType"], 1);
+}
+
+} // Y_UNIT_TEST_SUITE(NullAsTypeName)
 
 // NOLINTEND(misc-definitions-in-headers)

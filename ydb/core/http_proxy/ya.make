@@ -9,8 +9,14 @@ SRCS(
     auth_factory.h
     auth_actors.cpp
     auth_actors.h
+    controller_base.cpp
+    controller_base.h
+    controller_registry.cpp
     custom_metrics.h
     datastreams.cpp
+    datastreams.h
+    datastreams_serialization.cpp
+    datastreams_serialization.h
     discovery_actor.cpp
     discovery_actor.h
     events.h
@@ -26,9 +32,16 @@ SRCS(
     json_proto_conversion.cpp
     metrics_actor.cpp
     metrics_actor.h
+    serialization.cpp
+    serialization.h
     sqs.cpp
+    sqs.h
+    sqs_serialization.cpp
+    sqs_serialization.h
     utils.cpp
+    utils.h
     ymq.cpp
+    ymq.h
 )
 
 PEERDIR(
@@ -40,6 +53,7 @@ PEERDIR(
     ydb/core/base
     ydb/core/protos
     ydb/core/grpc_services/local_rpc
+    ydb/core/http_proxy/sqs_xml
     ydb/core/security
     yql/essentials/public/issue
     ydb/library/http_proxy/authorization
@@ -66,6 +80,10 @@ PEERDIR(
 YQL_LAST_ABI_VERSION()
 
 END()
+
+RECURSE(
+    sqs_xml
+)
 
 RECURSE_FOR_TESTS(
     ut

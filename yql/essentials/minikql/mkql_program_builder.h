@@ -93,20 +93,21 @@ inline bool HasSpillingFlag(const TCallable& callable) {
     return TStringBuf(callable.GetType()->GetName()).EndsWith("WithSpilling"_sb);
 }
 
+// CustomPython should be after CustomPython2 & CustomPython3
 // clang-format off
-#define MKQL_SCRIPT_TYPES(xx)                                                                                                 \
+#define MKQL_SCRIPT_TYPES(xx)                         \
     xx(Unknown, 0, unknown, false)                    \
     xx(Python, 1, python, false)                      \
     xx(Lua, 2, lua, false)                            \
     xx(ArcPython, 3, arcpython, false)                \
-    xx(CustomPython, 4, custompython, true)           \
-    xx(Javascript, 5, javascript, false)              \
-    xx(Python2, 6, python2, false)                    \
-    xx(ArcPython2, 7, arcpython2, false)              \
-    xx(CustomPython2, 8, custompython2, true)         \
-    xx(Python3, 9, python3, false)                    \
-    xx(ArcPython3, 10, arcpython3, false)             \
-    xx(CustomPython3, 11, custompython3, true)        \
+    xx(Javascript, 4, javascript, false)              \
+    xx(Python2, 5, python2, false)                    \
+    xx(ArcPython2, 6, arcpython2, false)              \
+    xx(CustomPython2, 7, custompython2, true)         \
+    xx(Python3, 8, python3, false)                    \
+    xx(ArcPython3, 9, arcpython3, false)              \
+    xx(CustomPython3, 10, custompython3, true)        \
+    xx(CustomPython, 11, custompython, true)          \
     xx(SystemPython2, 12, systempython2, false)       \
     xx(SystemPython3, 13, systempython3, false)       \
     xx(SystemPython3_8, 14, systempython3_8, false)   \
@@ -160,14 +161,14 @@ public:
 
     template <typename T, typename = std::enable_if_t<NUdf::TKnownDataType<T>::Result>>
     TRuntimeNode NewDataLiteral(T data) const {
-        return TRuntimeNode(BuildDataLiteral(NUdf::TUnboxedValuePod(data), NUdf::TDataType<T>::Id, Env_), true);
+        return TRuntimeNode(BuildDataLiteral(NUdf::TUnboxedValuePod(data), NUdf::TDataType<T>::Id, Env_), /*isImmediate=*/true);
     }
 
     template <typename T, typename = std::enable_if_t<NUdf::TTzDataType<T>::Result>>
     TRuntimeNode NewTzDataLiteral(typename NUdf::TDataType<T>::TLayout value, ui16 tzId) const {
         auto data = NUdf::TUnboxedValuePod(value);
         data.SetTimezoneId(tzId);
-        return TRuntimeNode(BuildDataLiteral(data, NUdf::TDataType<T>::Id, Env_), true);
+        return TRuntimeNode(BuildDataLiteral(data, NUdf::TDataType<T>::Id, Env_), /*isImmediate=*/true);
     }
 
     template <NUdf::EDataSlot Type>
@@ -301,6 +302,8 @@ public:
     TRuntimeNode BlockOr(TRuntimeNode first, TRuntimeNode second);
     TRuntimeNode BlockXor(TRuntimeNode first, TRuntimeNode second);
 
+    TRuntimeNode BlockGuess(TRuntimeNode variant, ui32 tupleIndex);
+    TRuntimeNode BlockGuess(TRuntimeNode variant, const std::string_view& memberName);
     TRuntimeNode BlockIf(TRuntimeNode condition, TRuntimeNode thenBranch, TRuntimeNode elseBranch);
     TRuntimeNode BlockJust(TRuntimeNode data);
 
@@ -488,6 +491,14 @@ public:
                                 ui64 memLimit, std::optional<ui32> sortedTableOrder,
                                 EAnyJoinSettings anyJoinSettings, ui32 tableIndexField,
                                 TType* returnType);
+
+    using TColumnsMap = TArrayRef<const std::pair<const ui32, const ui32>>;
+    TRuntimeNode ListJoinCore(TRuntimeNode stream,
+                              TType* keyType, const TColumnsMap& keyColumns,
+                              const TColumnsMap& leftColumns, const TColumnsMap& rightColumns,
+                              TType* leftArgType, const TUnaryLambda& leftArgmapLambda,
+                              TType* rightArgType, const TUnaryLambda& rightArgmapLambda,
+                              TType* returnType, const TTernaryLambda& joinLambda);
     TRuntimeNode GraceJoinCommon(const TStringBuf& funcName, TRuntimeNode flowLeft, TRuntimeNode flowRight, EJoinKind joinKind,
                                  const TArrayRef<const ui32>& leftKeyColumns, const TArrayRef<const ui32>& rightKeyColumns,
                                  const TArrayRef<const ui32>& leftRenames, const TArrayRef<const ui32>& rightRenames, TType* returnType, EAnyJoinSettings anyJoinSettings = EAnyJoinSettings::None);
@@ -892,6 +903,8 @@ private:
 
     template <bool Asc, bool Equal>
     TRuntimeNode BuildSqlCompare(const std::string_view& callableName, TRuntimeNode data1, TRuntimeNode data2);
+
+    TRuntimeNode BuildColumnList(const TColumnsMap& columnsMap);
 
     TType* ChooseCommonType(TType* type1, TType* type2);
     TType* BuildArithmeticCommonType(TType* type1, TType* type2);

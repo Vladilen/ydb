@@ -8,7 +8,9 @@
 #include <ydb/core/nbs/cloud/blockstore/config/config.h>
 #include <ydb/core/nbs/cloud/blockstore/libs/common/constants.h>
 #include <ydb/core/nbs/cloud/blockstore/libs/storage/api/service.h>
+#include <ydb/core/nbs/cloud/blockstore/libs/storage/partition_direct/model/vchunk_config.h>
 #include <ydb/core/nbs/cloud/blockstore/libs/storage/partition_direct/protos/partition_direct.pb.h>
+#include <ydb/core/nbs/cloud/blockstore/libs/storage/storage_transport/ic_storage_transport.h>
 #include <ydb/core/nbs/cloud/blockstore/libs/vhost/server.h>
 
 #include <ydb/core/nbs/cloud/storage/core/libs/actors/helpers.h>
@@ -17,6 +19,8 @@
 #include <ydb/core/base/tabletid.h>
 #include <ydb/core/mind/bscontroller/types.h>
 #include <ydb/core/node_whiteboard/node_whiteboard.h>
+
+#include <ydb/library/actors/core/mon.h>
 
 #include <util/system/fs.h>
 
@@ -188,11 +192,14 @@ TVector<IDirectBlockGroupPtr> TPartitionActor::CreateDirectBlockGroups(
             TActivationContext::ActorSystem(),
             nbsService->StorageConfig,
             executors[i],
+            VolumeConfig.GetDiskId(),
             TabletID(),
             Executor()->Generation(),   // generation
             i,                          // direct block group index
             std::move(ddiskIds),
-            std::move(persistentBufferDDiskIds));
+            std::move(persistentBufferDDiskIds),
+            std::make_unique<NTransport::TICStorageTransport>(
+                TActivationContext::ActorSystem()));
 
         directBlockGroups.emplace_back(std::move(directBlockGroup));
     }
@@ -238,7 +245,8 @@ void TPartitionActor::AllocateDDiskBlockGroup(const NActors::TActorContext& ctx)
 
 void TPartitionActor::Start(
     const NActors::TActorContext& ctx,
-    TDirectBlockGroupsConnections directBlockGroupsConnections)
+    TDirectBlockGroupsConnections directBlockGroupsConnections,
+    TVector<TVChunkConfig> vChunkConfigs)
 {
     LogTitle.SetDiskId(VolumeConfig.GetDiskId());
     LogTitle.SetGeneration(Executor()->Generation());
@@ -254,26 +262,60 @@ void TPartitionActor::Start(
     Y_ABORT_UNLESS(nbsService->Scheduler);
     Y_ABORT_UNLESS(nbsService->Timer);
 
+    TVChunkConfigByIndex vChunkConfigsByIndex;
+    vChunkConfigsByIndex.reserve(vChunkConfigs.size());
+    for (const auto& cfg: vChunkConfigs) {
+        vChunkConfigsByIndex[cfg.GetVChunkIndex()] = cfg;
+    }
+
     const ui64 blockCount = VolumeConfig.GetPartitions(0).GetBlockCount();
-    auto fastPathService = std::make_shared<TFastPathService>(
+    FastPathService = std::make_shared<TFastPathService>(
         TActivationContext::ActorSystem(),
+        SelfId(),
         TabletID(),
         VolumeConfig.GetDiskId(),
         blockCount,
         VolumeConfig.GetBlockSize(),
         CreateDirectBlockGroups(std::move(directBlockGroupsConnections)),
+        std::move(vChunkConfigsByIndex),
         StorageConfig,
         nbsService->Scheduler,
         nbsService->Timer,
         AppData()->Counters);
 
-    fastPathService->Run();
+    // Synchronous start mode - requests pass as the initial quorum of Locked
+    // DDisk sessions across all DBGs is achieved.
+    // TODO: make optional via StorageConfig after implementation of async mode.
+    FastPathService->Run().Subscribe(
+        [actorSystem = TActivationContext::ActorSystem(),
+         selfId = SelfId()]   //
+        (const NThreading::TFuture<void>&) mutable
+        {
+            // This callback runs OUTSIDE the actor thread - on the DBG's
+            // executor-thread
+            auto event = std::make_unique<
+                TEvPartitionDirectPrivate::TEvFastPathServiceReady>();
+            actorSystem->Send(selfId, event.release());
+        });
+}
 
-    LoadActorAdapter = CreateLoadActorAdapter(ctx.SelfID, fastPathService);
+void TPartitionActor::HandleFastPathServiceReady(
+    const TEvPartitionDirectPrivate::TEvFastPathServiceReady::TPtr& ev,
+    const NActors::TActorContext& ctx)
+{
+    Y_UNUSED(ev);
+    LOG_INFO(
+        ctx,
+        NKikimrServices::NBS_PARTITION,
+        "%s All DBGs reached initial locked quorum, opening endpoint",
+        LogTitle.GetWithTime().c_str());
+
+    LoadActorAdapter = CreateLoadActorAdapter(ctx.SelfID, FastPathService);
 
     {
         auto service = GetNbsService();
 
+        const ui64 blockCount = VolumeConfig.GetPartitions(0).GetBlockCount();
         TString socketPath = "/tmp/" + VolumeConfig.GetDiskId() + ".sock";
         NVhost::TStorageOptions options{
             .DiskId = VolumeConfig.GetDiskId(),
@@ -282,11 +324,11 @@ void TPartitionActor::Start(
             .StripeSize = StorageConfig->GetStripeSize(),
             .BlocksCount = blockCount,
             .VChunkSize = StorageConfig->GetVChunkSize(),
-            .VhostQueuesCount = 1};
+            .VhostQueuesCount = StorageConfig->GetVhostQueuesCount()};
         service->VhostServer->StartEndpoint(
             std::move(socketPath),
-            fastPathService,
-            fastPathService,
+            FastPathService,
+            FastPathService,
             options);
     }
 
@@ -296,6 +338,77 @@ void TPartitionActor::Start(
         "%s Started NBS LoadActorAdapter: %s",
         LogTitle.GetWithTime().c_str(),
         LoadActorAdapter.ToString().c_str());
+}
+
+void TPartitionActor::HandleFastPathServiceShutdown(
+    const TEvPartitionDirectPrivate::TEvFastPathServiceShutdown::TPtr& ev,
+    const NActors::TActorContext& ctx)
+{
+    Y_UNUSED(ev);
+
+    if (!FastPathService) {
+        LOG_INFO(
+            ctx,
+            NKikimrServices::NBS_PARTITION,
+            "%s FastPathService is not started",
+            LogTitle.GetWithTime().c_str());
+        Send(
+            ctx.SelfID,
+            std::make_unique<
+                TEvPartitionDirectPrivate::TEvFastPathServiceStopped>(),
+            0,   //   flags
+            ev->Cookie);
+
+        Reply(
+            ctx,
+            *ev,
+            std::make_unique<
+                TEvPartitionDirectPrivate::TEvFastPathServiceStopped>());
+
+        return;
+    }
+
+    auto onStop = FastPathService->Stop();
+    onStop.Subscribe(
+        [actorSystem = TActivationContext::ActorSystem(),
+         selfId = ctx.SelfID,
+         recipient = ev->Sender,
+         cookie = ev->Cookie]   //
+        (const NThreading::TFuture<void>& f)
+        {
+            Y_UNUSED(f);
+            {
+                auto event = std::make_unique<
+                    TEvPartitionDirectPrivate::TEvFastPathServiceStopped>();
+                actorSystem->Send(
+                    selfId,
+                    event.release(),
+                    0,   // flags
+                    cookie);
+            }
+            {
+                auto event = std::make_unique<
+                    TEvPartitionDirectPrivate::TEvFastPathServiceStopped>();
+                actorSystem->Send(
+                    recipient,
+                    event.release(),
+                    0,   // flags
+                    cookie);
+            }
+        });
+}
+
+void TPartitionActor::HandleFastPathServiceStopped(
+    const TEvPartitionDirectPrivate::TEvFastPathServiceStopped::TPtr& ev,
+    const NActors::TActorContext& ctx)
+{
+    Y_UNUSED(ev);
+
+    LOG_INFO(
+        ctx,
+        NKikimrServices::NBS_PARTITION,
+        "%s FastPathService stopped",
+        LogTitle.GetWithTime().c_str());
 }
 
 void TPartitionActor::HandleControllerAllocateDDiskBlockGroupResult(
@@ -412,6 +525,22 @@ void TPartitionActor::HandleUpdateVolumeConfig(
     ctx.Send(ev->Sender, response.release());
 }
 
+void TPartitionActor::HandleUpdateVChunkConfig(
+    const TEvPartitionDirectPrivate::TEvUpdateVChunkConfig::TPtr& ev,
+    const NActors::TActorContext& ctx)
+{
+    auto& cfg = ev->Get()->VChunkConfig;
+
+    LOG_DEBUG_S(
+        ctx,
+        NKikimrServices::NBS_PARTITION,
+        LogTitle.GetWithTime().c_str()
+            << " Handle UpdateVChunkConfig, vChunkIndex: "
+            << cfg.GetVChunkIndex());
+
+    ExecuteTx(ctx, CreateTx<TUpdateVChunkConfig>(std::move(cfg)));
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 
 STFUNC(TPartitionActor::StateWork)
@@ -435,6 +564,22 @@ STFUNC(TPartitionActor::StateWork)
         HFunc(
             NKikimr::TEvBlockStore::TEvUpdateVolumeConfig,
             HandleUpdateVolumeConfig);
+        HFunc(
+            TEvPartitionDirectPrivate::TEvUpdateVChunkConfig,
+            HandleUpdateVChunkConfig);
+        HFunc(
+            TEvPartitionDirectPrivate::TEvFastPathServiceReady,
+            HandleFastPathServiceReady);
+
+        HFunc(
+            TEvPartitionDirectPrivate::TEvFastPathServiceShutdown,
+            HandleFastPathServiceShutdown);
+
+        HFunc(
+            TEvPartitionDirectPrivate::TEvFastPathServiceStopped,
+            HandleFastPathServiceStopped);
+
+        HFunc(NMon::TEvRemoteHttpInfo, HandleHttpInfo);
 
         default:
             if (!HandleDefaultEvents(ev, SelfId())) {

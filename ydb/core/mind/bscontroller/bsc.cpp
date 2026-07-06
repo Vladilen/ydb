@@ -142,10 +142,16 @@ bool TBlobStorageController::TGroupInfo::FillInGroupParameters(
         return res;
     } else {
         bool res = true;
+        params->SetGroupSizeInUnits(GroupSizeInUnits);
+        if (VDisksInGroup.empty()
+            || !Topology
+            || !Topology->GetTotalVDisksNum()
+            || !Topology->GetTotalFailDomainsNum()) {
+            return false;
+        }
         res &= FillInResources(params->MutableAssuredResources(), true);
         res &= FillInResources(params->MutableCurrentResources(), false);
         res &= FillInVDiskResources(params);
-        params->SetGroupSizeInUnits(GroupSizeInUnits);
         return res;
     }
 }
@@ -196,10 +202,7 @@ bool TBlobStorageController::TGroupInfo::FillInResources(
             occupancy = Max(occupancy.value_or(0), vm.GetNormalizedOccupancy());
         }
 
-        const bool hasAllMetrics = metrics.HasMaxIOPS()
-            && metrics.HasMaxReadThroughput()
-            && metrics.HasMaxWriteThroughput()
-            && vslot->Metrics.HasNormalizedOccupancy();
+        const bool hasAllMetrics = pdisk->HasFullMetrics() && vslot->Metrics.HasNormalizedOccupancy();
         if (hasAllMetrics) {
             vdisksWithAllMetrics |= {Topology.get(), vslot->GetShortVDiskId()};
         }
@@ -218,7 +221,7 @@ bool TBlobStorageController::TGroupInfo::FillInResources(
         pb->SetReadThroughput(Min<ui64>(pb->HasReadThroughput() ? pb->GetReadThroughput() : Max<ui64>(), *readThroughput * factor));
     }
     if (writeThroughput) {
-        pb->SetWriteThroughput(Min<ui64>(pb->HasWriteThroughput() ? pb->GetReadThroughput() : Max<ui64>(), *writeThroughput * factor));
+        pb->SetWriteThroughput(Min<ui64>(pb->HasWriteThroughput() ? pb->GetWriteThroughput() : Max<ui64>(), *writeThroughput * factor));
     }
     if (occupancy) {
         pb->SetOccupancy(Max<double>(pb->HasOccupancy() ? pb->GetOccupancy() : Min<double>(), *occupancy));
@@ -1171,6 +1174,7 @@ ui32 TBlobStorageController::GetEventPriority(IEventHandle *ev) {
                     case NKikimrBlobStorage::TConfigRequest::TCommand::kDeleteDDiskPool:
                     case NKikimrBlobStorage::TConfigRequest::TCommand::kMoveDDisk:
                     case NKikimrBlobStorage::TConfigRequest::TCommand::kPopulatePDisk:
+                    case NKikimrBlobStorage::TConfigRequest::TCommand::kDeleteSpecificGroups:
                         return 2; // read-write commands go with higher priority as they are needed to keep cluster intact
 
                     case NKikimrBlobStorage::TConfigRequest::TCommand::kReadHostConfig:

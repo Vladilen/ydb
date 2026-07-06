@@ -149,7 +149,7 @@ public:
                     YQL_CLOG(INFO, CoreExecution) << "Rewrite node #" << item.Node->UniqueId() << " to #" << callableOutput->UniqueId()
                         << " in ApplyAsyncChanges()";
                     NewNodes_[item.Node] = callableOutput;
-                    combinedStatus = combinedStatus.Combine(TStatus(TStatus::Repeat, true));
+                    combinedStatus = combinedStatus.Combine(TStatus(TStatus::Repeat, /*hasRestart=*/true));
                     FinishNode(item.DataProvider->GetName(), *item.Node, *callableOutput);
                 }
             }
@@ -243,7 +243,7 @@ public:
         case TExprNode::EState::TypeComplete:
         case TExprNode::EState::ConstrInProgress:
         case TExprNode::EState::ConstrPending:
-            return TStatus(TStatus::Repeat, true);
+            return TStatus(TStatus::Repeat, /*hasRestart=*/true);
         case TExprNode::EState::ExecutionInProgress:
             return TStatus::Async;
         case TExprNode::EState::ExecutionPending:
@@ -254,7 +254,7 @@ public:
         case TExprNode::EState::ExecutionComplete:
             YQL_ENSURE(output->HasResult());
             OnNodeExecutionComplete(output, ctx);
-            return changed ? TStatus(TStatus::Repeat, true) : TStatus(TStatus::Ok);
+            return changed ? TStatus(TStatus::Repeat, /*hasRestart=*/true) : TStatus(TStatus::Ok);
         case TExprNode::EState::Error:
             return TStatus::Error;
         default:
@@ -980,7 +980,7 @@ TAutoPtr<IGraphTransformer> CreateCheckExecutionTransformer(const TTypeAnnotatio
 
             return true;
         };
-        static const THashSet<TStringBuf> NoExecutionList = {"InstanceOf", "Lag", "Lead", "RowNumber", "Rank", "DenseRank", "PercentRank", "CumeDist", "NTile"};
+        static const THashSet<TStringBuf> NoExecutionList = {"InstanceOf", "Lag", "Lead", "RowNumber", "Rank", "DenseRank", "PercentRank", "CumeDist", "NTile", "WatermarkGenerator"};
         static const THashSet<TStringBuf> NoExecutionListForCalcOverWindow = {"InstanceOf"};
         VisitExpr(input, [funcCheckExecution](const TExprNode::TPtr& node) {
             bool collectCalcOverWindow = true;

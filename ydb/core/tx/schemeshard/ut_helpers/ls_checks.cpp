@@ -500,6 +500,10 @@ void IsTransfer(const NKikimrScheme::TEvDescribeSchemeResult& record) {
     CheckPathType(record, NKikimrSchemeOp::EPathTypeTransfer);
 }
 
+void IsTestShardSet(const NKikimrScheme::TEvDescribeSchemeResult& record) {
+    CheckPathType(record, NKikimrSchemeOp::EPathTypeTestShardSet);
+}
+
 void CheckPathType(const NKikimrScheme::TEvDescribeSchemeResult& record, NKikimrSchemeOp::EPathType pathType) {
     UNIT_ASSERT_VALUES_EQUAL(record.GetStatus(), NKikimrScheme::StatusSuccess);
     const auto& pathDescr = record.GetPathDescription();
@@ -961,6 +965,9 @@ TCheckFunc SpecializedIndexDescription(const TString& proto) {
                         << actual.ShortDebugString());
                 break;
             }
+            case NKikimrSchemeOp::TIndexDescription::kBloomFilterDescription:
+            case NKikimrSchemeOp::TIndexDescription::kBloomNGrammFilterDescription:
+                break;
             case NKikimrSchemeOp::TIndexDescription::SPECIALIZEDINDEXDESCRIPTION_NOT_SET: {
                 UNIT_ASSERT_C(proto == "SPECIALIZEDINDEXDESCRIPTION_NOT_SET",
                     TStringBuilder() << "Expected"

@@ -7,6 +7,7 @@
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/library/grpc_common/constants.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/type_switcher.h>
 
+#include <util/generic/yexception.h>
 #include <util/string/builder.h>
 
 #include <grpcpp/grpcpp.h>
@@ -167,7 +168,6 @@ private:
                     }
                 };
                 auto facility = weakFacility.lock();
-                auto self = weakSelf.lock();
 
                 try {
                     if (facility) {
@@ -177,7 +177,7 @@ private:
                 } catch (...) {
                 }
 
-                if (self) {
+                if (auto self = weakSelf.lock()) {
                     std::lock_guard guard(self->Lock_);
                     self->ResetContextImpl();
                 }
@@ -185,25 +185,47 @@ private:
 
             TRequest req;
 
-            RequestFiller_(req);
+            try {
+                RequestFiller_(req);
+            } catch (...) {
+                const auto now = SysClock::now();
+                std::lock_guard guard(Lock_);
+                LastRequestError_ = TStringBuilder()
+                    << "Last request error was at " << FormatSysTimeUtcIsoMicros(now)
+                    << ". Failed to prepare IAM request: " << CurrentExceptionMessage();
+                ResetContextImpl();
+                RescheduleOnFailure();
+                return;
+            }
 
             Rpc_(Stub_.get(), &*Context_, &req, response.get(), std::move(cb));
         }
 
         void FillContext(std::unique_lock<std::mutex>& guard) {
+            std::optional<std::string> authToken;
+            if (AuthTokenProvider_) {
+                guard.unlock();
+                try {
+                    authToken = AuthTokenProvider_->GetAuthInfo();
+                } catch (...) {
+                    guard.lock();
+                    throw;
+                }
+                guard.lock();
+                if (NeedStop_) {
+                    return;
+                }
+            }
+
             auto& context = Context_.emplace();
-            auto deadline = gpr_time_add(
+            const auto deadline = gpr_time_add(
                 gpr_now(GPR_CLOCK_MONOTONIC),
                 gpr_time_from_micros(IamEndpoint_.RequestTimeout.MicroSeconds(), GPR_TIMESPAN));
 
             context.set_deadline(deadline);
 
-            if (AuthTokenProvider_) {
-                guard.unlock();
-                auto token = AuthTokenProvider_->GetAuthInfo();
-                guard.lock();
-
-                context.AddMetadata("authorization", "Bearer " + token);
+            if (authToken) {
+                context.AddMetadata("authorization", "Bearer " + *authToken);
             }
         }
 
@@ -228,9 +250,22 @@ private:
                 if (Context_.has_value() || SysClock::now() < NextTicketUpdate_) {
                     return true;
                 }
-                FillContext(guard);
+                try {
+                    FillContext(guard);
+                } catch (...) {
+                    const auto now = SysClock::now();
+                    LastRequestError_ = TStringBuilder()
+                        << "Last request error was at " << FormatSysTimeUtcIsoMicros(now)
+                        << ". Failed to prepare IAM request context: " << CurrentExceptionMessage();
+                    ResetContextImpl();
+                }
                 if (NeedStop_) {
+                    ResetContextImpl();
                     return false;
+                }
+                if (!Context_.has_value()) {
+                    RescheduleOnFailure();
+                    return true;
                 }
             }
             UpdateTicket();
@@ -247,29 +282,38 @@ private:
                     << " Message: \"" << status.error_message()
                     << "\" iam-endpoint: \"" << IamEndpoint_.Endpoint << "\"";
 
-                const auto now = SysClock::now();
-                const auto retryDelay = std::min(BackoffTimeout_, BACKOFF_MAX);
-                NextTicketUpdate_ = SafeAddSystemTime(now, ToBoundedSysDuration(retryDelay));
-                BackoffTimeout_ = std::min(BackoffTimeout_ * 2, BACKOFF_MAX);
+                RescheduleOnFailure();
             } else {
                 LastRequestError_ = "";
                 Ticket_ = result.iam_token();
-                BackoffTimeout_ = BACKOFF_START;
 
-                const auto now = SysClock::now();
-                const SysTimePoint refreshAt = SafeAddSystemTime(now, ToBoundedSysDuration(IamEndpoint_.RefreshPeriod));
                 const SysTimePoint expiresAt = SysClock::from_time_t(result.expires_at().seconds());
-                const SysDuration requestMargin = ToBoundedSysDuration(IamEndpoint_.RequestTimeout);
-
-                SysTimePoint nextUpdate = std::min(refreshAt, expiresAt);
-                nextUpdate = SafeAddSystemTime(nextUpdate, -requestMargin);
-                nextUpdate = std::max(nextUpdate, SafeAddSystemTime(now, ToBoundedSysDuration(MINIMUM_REFRESH_INTERVAL)));
-                NextTicketUpdate_ = nextUpdate;
+                RescheduleOnSuccess(expiresAt);
 
                 TokenReady_.notify_all();
             }
 
             ResetContextImpl();
+        }
+
+        void RescheduleOnFailure() { // call with Lock_
+            const auto now = SysClock::now();
+            const auto retryDelay = std::min(BackoffTimeout_, BACKOFF_MAX);
+            NextTicketUpdate_ = SafeAddSystemTime(now, ToBoundedSysDuration(retryDelay));
+            BackoffTimeout_ = std::min(BackoffTimeout_ * 2, BACKOFF_MAX);
+        }
+
+        void RescheduleOnSuccess(const SysTimePoint expiresAt) { // call with Lock_
+            BackoffTimeout_ = BACKOFF_START;
+
+            const auto now = SysClock::now();
+            const SysTimePoint refreshAt = SafeAddSystemTime(now, ToBoundedSysDuration(IamEndpoint_.RefreshPeriod));
+            const SysDuration requestMargin = ToBoundedSysDuration(IamEndpoint_.RequestTimeout);
+
+            SysTimePoint nextUpdate = std::min(refreshAt, expiresAt);
+            nextUpdate = SafeAddSystemTime(nextUpdate, -requestMargin);
+            nextUpdate = std::max(nextUpdate, SafeAddSystemTime(now, ToBoundedSysDuration(MINIMUM_REFRESH_INTERVAL)));
+            NextTicketUpdate_ = nextUpdate;
         }
 
     private:
@@ -320,6 +364,33 @@ private:
     std::shared_ptr<TImpl> Impl_;
 };
 
+// Adapter that keeps a self-owned ICoreFacility alive for the lifetime of an inner credentials
+// provider. Used by deprecated no-arg ICredentialsProviderFactory::CreateProvider() paths where
+// the caller hasn't supplied a facility.
+class TOwningFacilityCredentialsProvider : public ICredentialsProvider {
+public:
+    TOwningFacilityCredentialsProvider(std::shared_ptr<ICoreFacility> facility,
+                                       TCredentialsProviderPtr inner)
+        : Facility_(std::move(facility))
+        , Inner_(std::move(inner))
+    {}
+
+    std::string GetAuthInfo() const override {
+        return Inner_->GetAuthInfo();
+    }
+
+    bool IsValid() const override {
+        return Inner_->IsValid();
+    }
+
+private:
+    // Field declaration order matters: Inner_ is destroyed first so that its Stop() can still
+    // drive the facility's queue (cancel the in-flight gRPC context, drain the response callback),
+    // and only then is Facility_ destroyed.
+    std::shared_ptr<ICoreFacility> Facility_;
+    TCredentialsProviderPtr Inner_;
+};
+
 template<typename TRequest, typename TResponse, typename TService>
 class TIamJwtCredentialsProvider : public TGrpcIamCredentialsProvider<TRequest, TResponse, TService> {
 public:
@@ -349,8 +420,14 @@ class TIamJwtCredentialsProviderFactory : public ICredentialsProviderFactory {
 public:
     TIamJwtCredentialsProviderFactory(const TIamJwtParams& params): Params_(params) {}
 
+    // Deprecated. Kept for backward compatibility with callers (including out-of-tree mirrors)
+    // that don't have access to an ICoreFacility. Spins up a private TSimpleCoreFacility and ties
+    // its lifetime to the returned provider via TOwningFacilityCredentialsProvider.
     TCredentialsProviderPtr CreateProvider() const final {
-        ythrow yexception() << "Not supported";
+        auto facility = CreateSimpleCoreFacility();
+        auto inner = std::make_shared<TIamJwtCredentialsProvider<TRequest, TResponse, TService>>(
+            Params_, std::weak_ptr<ICoreFacility>(facility));
+        return std::make_shared<TOwningFacilityCredentialsProvider>(std::move(facility), std::move(inner));
     }
 
     TCredentialsProviderPtr CreateProvider(std::weak_ptr<ICoreFacility> facility) const override {
@@ -366,8 +443,12 @@ class TIamOAuthCredentialsProviderFactory : public ICredentialsProviderFactory {
 public:
     TIamOAuthCredentialsProviderFactory(const TIamOAuth& params): Params_(params) {}
 
+    // Deprecated. Kept for backward compatibility — see comment on TIamJwtCredentialsProviderFactory.
     TCredentialsProviderPtr CreateProvider() const final {
-        ythrow yexception() << "Not supported";
+        auto facility = CreateSimpleCoreFacility();
+        auto inner = std::make_shared<TIamOAuthCredentialsProvider<TRequest, TResponse, TService>>(
+            Params_, std::weak_ptr<ICoreFacility>(facility));
+        return std::make_shared<TOwningFacilityCredentialsProvider>(std::move(facility), std::move(inner));
     }
 
     TCredentialsProviderPtr CreateProvider(std::weak_ptr<ICoreFacility> facility) const override {

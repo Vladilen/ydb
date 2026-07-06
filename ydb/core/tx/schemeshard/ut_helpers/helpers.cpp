@@ -20,6 +20,7 @@
 #include <ydb/core/tx/tx_proxy/proxy.h>
 #include <ydb/core/util/pb.h>
 
+#include <yql/essentials/core/yql_type_annotation.h>
 #include <yql/essentials/public/issue/yql_issue_message.h>
 
 #include <library/cpp/testing/unittest/registar.h>
@@ -1125,10 +1126,43 @@ namespace NSchemeShardUT_Private {
     GENERIC_HELPERS(DropStreamingQuery, NKikimrSchemeOp::EOperationType::ESchemeOpDropStreamingQuery, &NKikimrSchemeOp::TModifyScheme::MutableDrop)
     DROP_BY_PATH_ID_HELPERS(DropStreamingQuery, NKikimrSchemeOp::EOperationType::ESchemeOpDropStreamingQuery)
 
+    // test shard
+    GENERIC_HELPERS(CreateTestShardSet, NKikimrSchemeOp::EOperationType::ESchemeOpCreateTestShardSet, &NKikimrSchemeOp::TModifyScheme::MutableCreateTestShardSet)
+    GENERIC_HELPERS(DropTestShardSet, NKikimrSchemeOp::EOperationType::ESchemeOpDropTestShardSet, &NKikimrSchemeOp::TModifyScheme::MutableDrop)
+
     #undef DROP_BY_PATH_ID_HELPERS
     #undef GENERIC_WITH_ATTRS_HELPERS
     #undef GENERIC_HELPERS
 
+    // external table
+    void AsyncCreateExternalTableOrReplace(TTestActorRuntime& runtime, ui64 txId, const TString& parentPath, const TString& scheme) {
+        auto* ev = CreateExternalTableRequest(TTestTxConfig::SchemeShard, txId, parentPath, scheme);
+        ev->Record.MutableTransaction()->Mutable(0)->SetReplaceIfExists(true);
+        AsyncSend(runtime, TTestTxConfig::SchemeShard, ev);
+    }
+
+    void TestCreateExternalTableOrReplace(TTestActorRuntime& runtime, ui64 txId, const TString& parentPath, const TString& scheme, const TVector<TExpectedResult>& expectedResults) {
+        auto* ev = CreateExternalTableRequest(TTestTxConfig::SchemeShard, txId, parentPath, scheme);
+        ev->Record.MutableTransaction()->Mutable(0)->SetReplaceIfExists(true);
+        AsyncSend(runtime, TTestTxConfig::SchemeShard, ev);
+        TestModificationResults(runtime, txId, expectedResults);
+    }
+
+    // external data source
+    void AsyncCreateExternalDataSourceOrReplace(TTestActorRuntime& runtime, ui64 txId, const TString& parentPath, const TString& scheme) {
+        auto* ev = CreateExternalDataSourceRequest(TTestTxConfig::SchemeShard, txId, parentPath, scheme);
+        ev->Record.MutableTransaction()->Mutable(0)->SetReplaceIfExists(true);
+        AsyncSend(runtime, TTestTxConfig::SchemeShard, ev);
+    }
+
+    void TestCreateExternalDataSourceOrReplace(TTestActorRuntime& runtime, ui64 txId, const TString& parentPath, const TString& scheme, const TVector<TExpectedResult>& expectedResults) {
+        auto* ev = CreateExternalDataSourceRequest(TTestTxConfig::SchemeShard, txId, parentPath, scheme);
+        ev->Record.MutableTransaction()->Mutable(0)->SetReplaceIfExists(true);
+        AsyncSend(runtime, TTestTxConfig::SchemeShard, ev);
+        TestModificationResults(runtime, txId, expectedResults);
+    }
+
+    // streaming query
     void TestCreateStreamingQueryOrReplace(TTestActorRuntime& runtime, ui64 txId, const TString& parentPath, const TString& scheme, const TVector<TExpectedResult>& expectedResults) {
         auto* ev = CreateStreamingQueryRequest(TTestTxConfig::SchemeShard, txId, parentPath, scheme);
         ev->Record.MutableTransaction()->Mutable(0)->SetReplaceIfExists(true);
@@ -1196,6 +1230,18 @@ namespace NSchemeShardUT_Private {
     {
         AsyncAssignBlockStoreVolume(runtime, txId, parentPath, name, mountToken, tokenVersion);
         TestModificationResults(runtime, txId, expectedResults);
+    }
+
+    TString CreateTestShardSetConfig(const TString& name, ui64 count) {
+        return TStringBuilder() << R"(
+                Name: ")" << name << R"("
+                Count: )" << count << R"(
+                StorageConfig {
+                }
+                CmdInitialize {
+                    MaxDataBytes: 1000
+                }
+            )";
     }
 
     TEvSchemeShard::TEvCancelTx *CancelTxRequest(ui64 txId, ui64 targetTxId) {
@@ -3236,7 +3282,7 @@ namespace NSchemeShardUT_Private {
             NYson::TYsonWriter writer(&ysonStream, NYson::EYsonFormat::Text);
             NYql::IDataProvider::TFillSettings fillSettings;
             bool truncated;
-            KikimrResultToYson(ysonStream, writer, result, {}, fillSettings, truncated);
+            NYql::KikimrResultToYson(ysonStream, writer, result, {}, fillSettings, truncated);
             UNIT_ASSERT(!truncated);
             shardRows.push_back(ysonStream.Str());
         }
@@ -3432,5 +3478,126 @@ namespace NSchemeShardUT_Private {
         UNIT_ASSERT_EQUAL(ev->Record.GetStatus(), expectedStatus);
 
         return ev->Record;
+    }
+
+    NKikimrSetColumnConstraint::TEvCreateResponse TestSetColumnConstraint(
+        TTestActorRuntime& runtime,
+        ui64 txId,
+        ui64 schemeShard,
+        const TString& dbName,
+        const TString& tablePath,
+        const TVector<TString>& notNullColumns,
+        const TString& userSID,
+        bool skipSettings)
+    {
+        // We can't do `GetRequest`, because it is not implemented at the time of writing the test
+        auto request = MakeHolder<TEvSetColumnConstraint::TEvCreateRequest>();
+        request->Record.SetTxId(txId);
+        request->Record.SetDatabaseName(dbName);
+
+        if (userSID != "") {
+            request->Record.SetUserSID(userSID);
+        }
+
+        if (!skipSettings) {
+            NKikimrSetColumnConstraint::TSetColumnConstraintSettings settings;
+            settings.SetTablePath(tablePath);
+            for (const auto& col : notNullColumns) {
+                settings.AddNotNullColumns(col);
+            }
+
+            *request->Record.MutableSettings() = std::move(settings);
+        }
+
+        auto sender = runtime.AllocateEdgeActor();
+        ForwardToTablet(runtime, schemeShard, sender, request.Release());
+
+        TAutoPtr<IEventHandle> handle;
+        auto* event = runtime.GrabEdgeEvent<TEvSetColumnConstraint::TEvCreateResponse>(handle);
+        UNIT_ASSERT(event);
+        return event->Record;
+    }
+
+    NKikimrSetColumnConstraint::TEvCreateResponse TestSetColumnConstraint(
+        TTestActorRuntime& runtime,
+        ui64 txId,
+        ui64 schemeShard,
+        const TString& dbName,
+        const TString& tablePath,
+        const TVector<TString>& notNullColumns)
+    {
+        return TestSetColumnConstraint(runtime, txId, schemeShard, dbName, tablePath, notNullColumns, "", false);
+    }
+
+    NKikimrSetColumnConstraint::TEvCreateResponse TestSetColumnConstraintWithoutSettings(
+        TTestActorRuntime& runtime,
+        ui64 txId,
+        ui64 schemeShard,
+        const TString& dbName,
+        const TString& tablePath,
+        const TVector<TString>& notNullColumns)
+    {
+        return TestSetColumnConstraint(runtime, txId, schemeShard, dbName, tablePath, notNullColumns, "", true);
+    }
+
+    NKikimrSetColumnConstraint::TEvCreateResponse TestSetColumnConstraint(
+        TTestActorRuntime& runtime,
+        ui64 txId,
+        ui64 schemeShard,
+        const TString& dbName,
+        const TString& tablePath,
+        const TVector<TString>& notNullColumns,
+        const TString& userSID)
+    {
+        return TestSetColumnConstraint(runtime, txId, schemeShard, dbName, tablePath, notNullColumns, userSID, false);
+    }
+
+    void AsyncSetColumnConstraint(
+        TTestActorRuntime& runtime,
+        ui64 txId,
+        ui64 schemeShard,
+        const TString& dbName,
+        const TString& tablePath,
+        const TVector<TString>& notNullColumns)
+    {
+        NKikimrSetColumnConstraint::TSetColumnConstraintSettings settings;
+        settings.SetTablePath(tablePath);
+        for (const auto& col : notNullColumns) {
+            settings.AddNotNullColumns(col);
+        }
+
+        auto sender = runtime.AllocateEdgeActor();
+        auto request = MakeHolder<TEvSetColumnConstraint::TEvCreateRequest>(txId, dbName, std::move(settings));
+        ForwardToTablet(runtime, schemeShard, sender, request.Release());
+    }
+
+    void TestCheckColumnsNotNull(
+        TTestActorRuntime& runtime,
+        const TString& tablePath,
+        const std::map<TString, bool>& expectedColumnNotNullStates)
+    {
+        const auto describeResult = DescribePath(runtime, tablePath);
+        const auto& columns = describeResult.GetPathDescription().GetTable().GetColumns();
+
+        std::map<TString, bool> currentNotNull;
+
+        for (const auto& column : columns) {
+            currentNotNull[column.GetName()] = column.GetNotNull();
+        }
+
+        for (const auto& [columnName, expectedNotNullValue] : expectedColumnNotNullStates) {
+            auto it = currentNotNull.find(columnName);
+            UNIT_ASSERT_C(
+                it != currentNotNull.end(),
+                TStringBuilder()
+                    << "[CheckColumnsNotNull] Column `" << columnName << "` not found. "
+                    << describeResult.ShortDebugString());
+            UNIT_ASSERT_VALUES_EQUAL_C(
+                it->second,
+                expectedNotNullValue,
+                TStringBuilder()
+                    << "[CheckColumnsNotNull] Column `" << columnName << "` not null state mismatch. "
+                    << describeResult.ShortDebugString());
+        }
     }
 }

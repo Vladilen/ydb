@@ -131,8 +131,6 @@ async def generate_cfg(hosts, config: dict, parent_task: progress.TaskNode = Non
     commands = [
         f'mkdir -p {deploy_ctx.work_directory}/static',
         f'mkdir -p {deploy_ctx.work_directory}/dynamic',
-        f'mkdir -p {deploy_ctx.work_directory}/nbs',
-        f'mkdir -p {deploy_ctx.work_directory}/nbs/cfg',
     ]
     result = await term.shell(' && '.join(commands))
     if not result:
@@ -140,7 +138,6 @@ async def generate_cfg(hosts, config: dict, parent_task: progress.TaskNode = Non
     commands = [
         f'rm -rf {deploy_ctx.work_directory}/static/*',
         f'rm -rf {deploy_ctx.work_directory}/dynamic/*',
-        f'rm -rf {deploy_ctx.work_directory}/nbs/cfg/*',
     ]
     result = await term.shell(' && '.join(commands))
     if not result:
@@ -172,10 +169,22 @@ def make_generate_configs_step(hosts: list[str], config: dict):
     )
 
 
+async def install_multinode(hosts: list[str], config: dict, parent_task: progress.TaskNode = None):
+    result = await deploy.act_install(hosts, config, parent_task=parent_task)
+    if result:
+        return result
+    if isinstance(result, progress.TaskResult):
+        return result
+    return progress.TaskResult(
+        level=progress.TaskResultLevel.ERROR,
+        message='Install multinode failed without details. Check operation logs or host state.',
+    )
+
+
 def make_install_multinode_step(hosts: list[str], config: dict):
     return progress.Step(
         title='[bold blue]Install multinode',
-        command=lambda parent_task, kv_storage: deploy.act_install(hosts, config, parent_task=parent_task),
+        command=lambda parent_task, kv_storage: install_multinode(hosts, config, parent_task=parent_task),
     )
 
 

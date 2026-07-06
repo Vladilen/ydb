@@ -97,8 +97,8 @@ void TCommandSql::Parse(TConfig& config) {
     ParseInputFormats();
     ParseOutputFormats();
     if (Query && QueryFile) {
-        throw TMisuseException() << "Both mutually exclusive options \"Text of query\" (\"--query\", \"-q\") "
-            << "and \"Path to file with query text\" (\"--file\", \"-f\") were provided.";
+        throw TMisuseException() << "Both mutually exclusive options \"Text of script\" (\"--script\", \"-s\") "
+            << "and \"Path to file with script text\" (\"--file\", \"-f\") were provided.";
     }
     if (ExecSettings.ExplainMode && ExecSettings.ExplainAnalyzeMode) {
         throw TMisuseException() << "Both mutually exclusive options \"Explain mode\" (\"--explain\") "
@@ -153,7 +153,7 @@ int TCommandSql::Run(TConfig& config) {
 }
 
 int TCommandSql::RunCommand(TConfig& config) {
-    TDriver driver = CreateDriver(config);
+    auto driver = CreateDriver(config);
     TExecuteGenericQuery executor(driver);
     SetInterruptHandlers();
 
