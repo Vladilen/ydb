@@ -116,7 +116,7 @@ struct TOwnedLogRow {
 }
 ```
 
-`record_id` **только** в колонке `RecordId`, в JSON labels **не** дублируется.  
+`record_id` **только** в колонке `RecordId`, в JSON labels **не** дублируется.
 `cluster` **не** в labels — в пути таблицы (dedicated) или в колонке `cluster` (common).
 
 ### 2.3. В YDB: колонки строки
@@ -143,7 +143,7 @@ struct TOwnedLogRow {
 
 Если пара `(cluster, service)` **не** в `dedicated_service`:
 
-**Путь:** `{prefix}/logs_store/techplatform/production/stq-agent`  
+**Путь:** `{prefix}/logs_store/techplatform/production/stq-agent`
 **PK:** `(timestamp, cluster, record_id)` — **7 колонок**, добавляется `cluster`:
 
 | timestamp | **cluster** | record_id | level | message | labels | meta |
@@ -253,13 +253,17 @@ flowchart LR
 
 ### 4.4. AnyValue в атрибутах и body
 
-| AnyValue | В `labels` / `meta` | В `message` |
-|----------|---------------------|-------------|
-| string | как есть | текст |
-| int / bool / double | десятичная строка | — |
-| bytes | raw в `TString` | — |
-| array / kvlist | `"<non_scalar>"` если скаляр не выбран | — |
-| сложный body | — | как для string или `<non_scalar>` |
+`AnyValueToOtelAsString` / `WireParseAnyValueString` (`otel_logs_anyvalue.cpp`). При `ingest_streaming_json_serializer: true` (perf) nested пишется через `NJsonWriter`; иначе — `TJsonValue` + `JsonValueToOtelAsString` (тот же результат в map).
+
+| AnyValue | В `labels` / `meta` (значение в `THashMap`) | В `message` |
+|----------|---------------------------------------------|-------------|
+| string | как есть | текст (`string_value`) |
+| int / bool / double | десятичная строка (`"502"`, `"true"`) | — |
+| bytes | **Base64** | — |
+| array / kvlist | **одна строка** — compact JSON (`{"a":1}` / `[1,2]`) | wire: те же правила; proto: `AnyValueToJsonValue` + `WriteJson` |
+| пустой / неизвестный | ключ отбрасывается | пусто |
+
+Вложенный OTLP **не раскрывается** в отдельные ключи map: `tags` (kvlist) → одно поле `tags` со строкой `{"team":"payments",...}`.
 
 Ключи JSON **плоские**: `"http.route"` — один ключ, не вложенный объект `http.route`.
 
@@ -291,15 +295,15 @@ TOwnedLogRow.LabelsJson, .MetaJson   ← одна TString на поле
 
 **`MergeStringMap`:** в `dst` уже есть ключи от log-record; из `src` (resource) добавляются **только отсутствующие** ключи. Значения при этом **копируются** (`(*dst)[k] = v`), не move. Итог: при конфликте побеждает значение из log, resource не перезаписывает.
 
-**`JsonStringifyMap`:**
+**`JsonStringifyMap`**:
 
 ```cpp
-THashMap → NJson::TJsonValue (map) → NJson::WriteJson → TString
+THashMap → NJsonWriter::TBuf (BeginObject, WriteKey + WriteString(v)) → TString
 ```
 
-- пустая map → `"{}"` без аллокации дерева;
-- иначе для каждой пары `InsertValue(k, v)` — **копия** ключа и значения в `TJsonValue`;
-- `WriteJson` — ещё одна **аллокация**: готовый UTF-8 текст в `LabelsJson` / `MetaJson`.
+- пустая map → `"{}"`;
+- каждое значение в итоговом JSON — **строка в кавычках**, даже если в map лежало `"502"` или nested JSON-текст (`"tags":"{\"team\":\"payments\"}"`);
+- промежуточного `TJsonValue` для flat map **нет**.
 
 Промежуточное дерево JSON в строке **не** хранится — только итоговые две `TString` в `TOwnedLogRow`. При flush эти же байты снова **копируются** в Arrow `StringBuilder` (§7).
 
@@ -344,7 +348,7 @@ DDL и PK: `otel_logs_ddl.cpp`.
 | wire → атрибуты в `THashMap` | **copy** key/value с wire (`WireParseKeyValue`, classify) |
 | `ResourceLogs` blob | **copy** в `TVector<char>` для двух проходов |
 | merge resource → labels/meta | **copy** значений (`MergeStringMap`, только новые ключи) |
-| `THashMap` → `LabelsJson` / `MetaJson` | **copy** в `TJsonValue` + **alloc** текста (`JsonStringifyMap`) |
+| `THashMap` → `LabelsJson` / `MetaJson` | **stream** в `TString` (`NJsonWriter`, `WriteString` на каждое value) |
 | прочие поля строки (`Message`, `RecordId`, …) | **copy** / move по полю |
 | `TOwnedLogRow` → буфер shard | **move** целиком (в т.ч. уже собранные JSON-строки) |
 | буфер → flush chunk | **move** |
@@ -382,18 +386,164 @@ DDL и PK: `otel_logs_ddl.cpp`.
 
 ---
 
-## 10. Файлы в коде
+## 10. Полный пример: один LogRecord → одна строка YDB
 
-| Что | Файл |
-|-----|------|
-| gRPC, очереди, flush, Arrow, BulkUpsert | `otel_logs_service.cpp` |
-| Wire ingest | `otel_logs_wire_ingest.cpp` |
-| JSON maps | `otel_logs_json.cpp` |
-| Маршрутизация | `otel_logs_routing.cpp` |
-| DDL / TTL | `otel_logs_ddl.cpp` |
-| Строка после parse | `otel_logs_owned_row.h` |
-| Shard hash | `otel_logs_shard_hash.cpp` |
-| JsonDocument на tablet | `ydb/core/formats/arrow/converter.cpp` |
-| Конфиг | `bin/otel_logs_to_ydb.yaml` |
+**Вход (фрагмент protobuf):**
 
-Альтернатива wire-parse (если `ingest_wire_to_owned: false`): Arena + полный protobuf → `MakeOwnedLogRow` — та же `TOwnedLogRow`, другой CPU-профиль.
+```
+resource.attributes:
+  project = "techplatform"
+  cluster = "production"
+  service = "stq-agent"
+  hostname = "host-42"
+  dc = "sas"
+
+log_records[0]:
+  time_unix_nano = 1710000000123456789
+  severity_number = 9
+  body = "POST /api/v1/task finished"
+  attributes:
+    request_id = "7f3c9e2a"
+    record_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    http.status_code = 200          # int_value → "200" в meta
+    tags = kvlist { team = "payments", env = "prod" }   # → meta, см. ниже
+  trace_id = 4bf92f3577b34da6a3ce929d0e0e4736   # ровно 16 байт (OTLP bytes)
+  span_id = 00f067aa0ba902b7                     # ровно 8 байт
+```
+
+**Выход (dedicated, таблица `/olap-perf/deploy_logs/logs/techplatform/production/stq-agent`):**
+
+| Поле | Значение |
+|------|----------|
+| `timestamp` | `2024-03-09 12:00:00.123456` UTC (nano / 1000 → µs) |
+| `record_id` | `a1b2c3d4-e5f6-7890-abcd-ef1234567890` |
+| `level` | `9` |
+| `message` | `POST /api/v1/task finished` |
+| `labels` | `{"request_id":"7f3c9e2a","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7","project":"techplatform","service":"stq-agent","hostname":"host-42"}` |
+| `meta` | `{"dc":"sas","http.status_code":"200","tags":"{\"team\":\"payments\",\"env\":\"prod\"}"}` |
+
+`trace_id` / `span_id` в protobuf — **сырые байты**, не hex-строка. `TraceHex` (`otel_logs_service.cpp`, `otel_logs_wire_ingest.cpp`) делает `HexEncode` только если длина **ровно 16 или 8** байт; иначе ключ в `labels` не попадает.
+
+**Вложенность (`kvlist` / `array` в attributes):** OTLP-дерево **не** раскладывается по ключам YDB. `tags` (kvlist) сначала становится compact JSON-текстом `{"team":"payments","env":"prod"}` в `THashMap`, затем `JsonStringifyMap` кладёт его в `meta` как **значение-строку** (экранированный JSON внутри JSON). То же для `array_value`, например `retry_hints = [1, "timeout"]` → `"retry_hints":"[1,\"timeout\"]"` в `meta`.
+
+Несколько `log_records` в одном `Export` → несколько строк в той же (или другой) таблице. Несколько `resource_logs` → разные таблицы при разном `project` / `service` / `cluster`.
+
+---
+
+## 11. Развёрнутый пример: один Export → несколько таблиц
+
+**Вход**
+
+```
+ExportLogsServiceRequest
+
+resource_logs[0]
+  resource.attributes: project=project_1, cluster=cluster_1, service=service_a, hostname=host_a, dc=dc_a
+  scope_logs[0]
+    scope.name = "scope_1"
+    log_records[0]
+      time_unix_nano = 1710000000001000000
+      severity_number = 9
+      body = "msg_a1"
+      record_id = "rec_a1"
+      request_id = "req_a1"
+      arg1 = "val1"
+      http.status_code = 200
+      trace_id = 4bf92f3577b34da6a3ce929d0e0e4736
+      span_id = 00f067aa0ba902b7
+    log_records[1]
+      time_unix_nano = 1710000000002000000
+      severity_number = 13
+      body = "msg_a2"
+      record_id = "rec_a2"
+      request_id = "req_a2"
+      arg2 = "val2"
+      tags = kvlist { team = "team_a", env = "dev" }
+  scope_logs[1]
+    scope.name = "scope_2"
+    log_records[0]
+      time_unix_nano = 1710000000003000000
+      severity_number = 9
+      body = "msg_a3"
+      record_id = "rec_a3"
+      request_id = "req_a3"
+      arg3 = "val3"
+
+resource_logs[1]
+  resource.attributes: project=project_1, cluster=cluster_1, service=service_b, hostname=host_b, dc=dc_b
+  scope_logs[0]
+    scope.name = "scope_3"
+    log_records[0]
+      time_unix_nano = 1710000000004000000
+      severity_number = 9
+      body = "msg_b1"
+      record_id = "rec_b1"
+      request_id = "req_b1"
+      user_login = "user_1"
+    log_records[1]
+      time_unix_nano = 1710000000005000000
+      severity_number = 17
+      body = "msg_b2"
+      record_id = "rec_b2"
+      request_id = "req_b2"
+      retry_hints = [1, "timeout"]
+
+resource_logs[2]
+  resource.attributes: project=project_2, cluster=cluster_2, service=service_c, hostname=host_c, dc=dc_c, env = "prod"
+  scope_logs[0]
+    log_records[0]
+      time_unix_nano = 1710000000006000000
+      severity_number = 9
+      body = "msg_c1"
+      record_id = "rec_c1"
+      request_id = "req_c1"
+      http.route = "/api/path_1"
+    log_records[1]
+      time_unix_nano = 1710000000007000000
+      severity_number = 13
+      body = "msg_c2"
+      record_id = "rec_c2"
+      request_id = "req_c2"
+      nested = kvlist { k1 = "v1" }
+
+resource_logs[3]
+  resource.attributes: project=project_1, cluster=cluster_2, service=service_d, hostname=host_d, dc=dc_d
+  scope_logs[0]
+    log_records[0]
+      time_unix_nano = 1710000000008000000
+      severity_number = 9
+      body = "msg_d1"
+      record_id = "rec_d1"
+      request_id = "req_d1"
+      extra = "meta_only"
+```
+
+**Выход**
+
+`/olap-perf/deploy_logs/logs/project_1/cluster_1/service_a`
+
+| timestamp | record_id | level | message | labels | meta |
+|-----------|-----------|-------|---------|--------|------|
+| 2024-03-09 12:00:00.001000 | rec_a1 | 9 | msg_a1 | `{"request_id":"req_a1","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7","service":"service_a","hostname":"host_a"}` | `{"dc":"dc_a","arg1":"val1","http.status_code":"200"}` |
+| 2024-03-09 12:00:00.002000 | rec_a2 | 13 | msg_a2 | `{"request_id":"req_a2","service":"service_a","hostname":"host_a"}` | `{"dc":"dc_a","arg2":"val2","tags":"{\"team\":\"team_a\",\"env\":\"dev\"}"}` |
+| 2024-03-09 12:00:00.003000 | rec_a3 | 9 | msg_a3 | `{"request_id":"req_a3","service":"service_a","hostname":"host_a"}` | `{"dc":"dc_a","arg3":"val3"}` |
+
+`/olap-perf/deploy_logs/logs/project_1/cluster_1/service_b`
+
+| timestamp | record_id | level | message | labels | meta |
+|-----------|-----------|-------|---------|--------|------|
+| 2024-03-09 12:00:00.004000 | rec_b1 | 9 | msg_b1 | `{"request_id":"req_b1","service":"service_b","hostname":"host_b"}` | `{"dc":"dc_b","user_login":"user_1"}` |
+| 2024-03-09 12:00:00.005000 | rec_b2 | 17 | msg_b2 | `{"request_id":"req_b2","service":"service_b","hostname":"host_b"}` | `{"dc":"dc_b","retry_hints":"[1,\"timeout\"]"}` |
+
+`/olap-perf/deploy_logs/logs/project_2/cluster_2/service_c`
+
+| timestamp | record_id | level | message | labels | meta |
+|-----------|-----------|-------|---------|--------|------|
+| 2024-03-09 12:00:00.006000 | rec_c1 | 9 | msg_c1 | `{"request_id":"req_c1","service":"service_c","hostname":"host_c"}` | `{"dc":"dc_c","env":"prod","http.route":"/api/path_1"}` |
+| 2024-03-09 12:00:00.007000 | rec_c2 | 13 | msg_c2 | `{"request_id":"req_c2","service":"service_c","hostname":"host_c"}` | `{"dc":"dc_c","env":"prod","nested":"{\"k1\":\"v1\"}"}` |
+
+`/olap-perf/deploy_logs/logs/project_1/cluster_2/service_d`
+
+| timestamp | record_id | level | message | labels | meta |
+|-----------|-----------|-------|---------|--------|------|
+| 2024-03-09 12:00:00.008000 | rec_d1 | 9 | msg_d1 | `{"request_id":"req_d1","service":"service_d","hostname":"host_d"}` | `{"dc":"dc_d","extra":"meta_only"}` |
