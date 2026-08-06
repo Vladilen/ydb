@@ -1,0 +1,432 @@
+diff --git a/ydb/core/formats/arrow/program/execution.h b/ydb/core/formats/arrow/program/execution.h
+index 4675aa7abfc..eef0bbfdb54 100644
+--- a/ydb/core/formats/arrow/program/execution.h
++++ b/ydb/core/formats/arrow/program/execution.h
+@@ -357,18 +357,22 @@ private:
+     bool Extracted = false;
+ 
+ public:
++    bool HasResources() const {
++        return !Extracted && !!Resources;
++    }
++
+     const NAccessor::TAccessorsCollection& GetResources() const {
+-        AFL_VERIFY(!Extracted);
++        AFL_VERIFY(HasResources());
+         return *Resources;
+     }
+ 
+     NAccessor::TAccessorsCollection& MutableResources() const {
+-        AFL_VERIFY(!Extracted);
++        AFL_VERIFY(HasResources());
+         return *Resources;
+     }
+ 
+     std::unique_ptr<NAccessor::TAccessorsCollection> ExtractResources() {
+-        AFL_VERIFY(!Extracted);
++        AFL_VERIFY(HasResources());
+         Extracted = true;
+         return std::move(Resources);
+     }
+diff --git a/ydb/core/tx/columnshard/engines/reader/common/scan_memory_limiter.cpp b/ydb/core/tx/columnshard/engines/reader/common/scan_memory_limiter.cpp
+index 5e78692c53e..50034a9f384 100644
+--- a/ydb/core/tx/columnshard/engines/reader/common/scan_memory_limiter.cpp
++++ b/ydb/core/tx/columnshard/engines/reader/common/scan_memory_limiter.cpp
+@@ -34,4 +34,13 @@ bool SendScanToAllocation(EScanGroupedMemoryLimiterOperator operatorType, const
+     }
+ }
+ 
++bool IsScanMemoryLimiterEnabled(EScanGroupedMemoryLimiterOperator operatorType) {
++    switch (operatorType) {
++        case EScanGroupedMemoryLimiterOperator::Deduplication:
++            return NGroupedMemoryManager::TDeduplicationMemoryLimiterOperator::IsEnabled();
++        case EScanGroupedMemoryLimiterOperator::Scan:
++            return NGroupedMemoryManager::TScanMemoryLimiterOperator::IsEnabled();
++    }
++}
++
+ }   // namespace NKikimr::NOlap::NReader
+diff --git a/ydb/core/tx/columnshard/engines/reader/common/scan_memory_limiter.h b/ydb/core/tx/columnshard/engines/reader/common/scan_memory_limiter.h
+index 9a039d0c139..91a5a54ff51 100644
+--- a/ydb/core/tx/columnshard/engines/reader/common/scan_memory_limiter.h
++++ b/ydb/core/tx/columnshard/engines/reader/common/scan_memory_limiter.h
+@@ -18,4 +18,6 @@ std::shared_ptr<NGroupedMemoryManager::TProcessGuard> BuildScanProcessGuard(ESca
+ bool SendScanToAllocation(EScanGroupedMemoryLimiterOperator operatorType, const ui64 processId, const ui64 scopeId, const ui64 groupId,
+     const std::vector<std::shared_ptr<NGroupedMemoryManager::IAllocation>>& tasks, const std::optional<ui32>& stageIdx);
+ 
++bool IsScanMemoryLimiterEnabled(EScanGroupedMemoryLimiterOperator operatorType);
++
+ }   // namespace NKikimr::NOlap::NReader
+diff --git a/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/fetch_steps.cpp b/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/fetch_steps.cpp
+index 37cb8b6d13f..727368de5d5 100644
+--- a/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/fetch_steps.cpp
++++ b/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/fetch_steps.cpp
+@@ -90,6 +90,12 @@ bool TAllocateMemoryStep::TFetchingStepAllocation::DoOnAllocated(std::shared_ptr
+     } else {
+         data->RegisterAllocationGuard(std::move(guard));
+     }
++    if (!ScheduleContinuation) {
++        // Allocation was satisfied inline (e.g. memory limiter disabled). The caller continues on the
++        // same stack — do not start a concurrent TStepAction that would race with it.
++        FOR_DEBUG_LOG(NKikimrServices::COLUMNSHARD_SCAN_EVLOG, data->AddEvent("fmalloc_inline"));
++        return true;
++    }
+     if (NeedNextStep) {
+         Step.Next();
+     }
+@@ -101,13 +107,15 @@ bool TAllocateMemoryStep::TFetchingStepAllocation::DoOnAllocated(std::shared_ptr
+ }
+ 
+ TAllocateMemoryStep::TFetchingStepAllocation::TFetchingStepAllocation(const std::shared_ptr<IDataSource>& source, const ui64 mem,
+-    const TFetchingScriptCursor& step, const NArrow::NSSA::IMemoryCalculationPolicy::EStage stageIndex, const bool needNextStep)
++    const TFetchingScriptCursor& step, const NArrow::NSSA::IMemoryCalculationPolicy::EStage stageIndex, const bool needNextStep,
++    const bool scheduleContinuation)
+     : TBase(mem)
+     , Source(source)
+     , Step(step)
+     , TasksGuard(source->GetContext()->GetCommonContext()->GetCounters().GetResourcesAllocationTasksGuard())
+     , StageIndex(stageIndex)
+     , NeedNextStep(needNextStep)
++    , ScheduleContinuation(scheduleContinuation)
+ {
+ }
+ 
+diff --git a/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/fetch_steps.h b/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/fetch_steps.h
+index 67ebcc0da2b..2a58e309e06 100644
+--- a/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/fetch_steps.h
++++ b/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/fetch_steps.h
+@@ -53,13 +53,15 @@ public:
+         NColumnShard::TCounterGuard TasksGuard;
+         const NArrow::NSSA::IMemoryCalculationPolicy::EStage StageIndex;
+         const bool NeedNextStep;
++        const bool ScheduleContinuation;
+         virtual bool DoOnAllocated(std::shared_ptr<NGroupedMemoryManager::TAllocationGuard>&& guard,
+             const std::shared_ptr<NGroupedMemoryManager::IAllocation>& allocation) override;
+         virtual void DoOnAllocationImpossible(const TString& errorMessage) override;
+ 
+     public:
+         TFetchingStepAllocation(const std::shared_ptr<IDataSource>& source, const ui64 mem, const TFetchingScriptCursor& step,
+-            const NArrow::NSSA::IMemoryCalculationPolicy::EStage stageIndex, const bool needNextStep = true);
++            const NArrow::NSSA::IMemoryCalculationPolicy::EStage stageIndex, const bool needNextStep = true,
++            const bool scheduleContinuation = true);
+     };
+ 
+     void AddAllocation(const TColumnsSetIds& ids, const EMemType memType) {
+diff --git a/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/fetching.cpp b/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/fetching.cpp
+index 230d86f5c61..42e45dc71ce 100644
+--- a/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/fetching.cpp
++++ b/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/fetching.cpp
+@@ -77,7 +77,7 @@ TStepAction::TStepAction(
+ NO_SANITIZE_THREAD
+ void TProgramStep::ReportTracing(const std::shared_ptr<IDataSource>& source, const TDuration executionDurationMs,
+     const TString& currentExecutionResult, const ui32 nodeId, const TString& currentCategoryName,
+-    const std::shared_ptr<NArrow::NSSA::IResourceProcessor>& processor) const {
++    const std::shared_ptr<NArrow::NSSA::IResourceProcessor>& processor, const ui64 reservedMemory) const {
+     if (!processor) {
+         return;
+     }
+@@ -97,12 +97,68 @@ void TProgramStep::ReportTracing(const std::shared_ptr<IDataSource>& source, con
+     const TDuration finishDurationMs = source->GetAndResetWaitDuration();
+     const auto processorType = processor->GetProcessorType();
+     const TString details = processor->DebugJson().GetStringRobust();
+-    const auto& resources = source->GetExecutionContext().GetExecutionVisitorVerified()->MutableContext().GetResources();
+-    const ui32 filteredRows = resources.GetRecordsCountActualOptional().value_or(source->GetRecordsCount());
++
++    // Pin the visitor for the duration of this function so Stop() on ExecutionContext cannot free it under us.
++    // Snapshot scalars only — do not keep references into Resources across further work.
++    // Never call GetReservedMemory() here: Execute() may have started a concurrent continuation that
++    // mutates ResourceGuards (RegisterAllocationGuard / ClearMemoryGuards) on another worker.
++    const auto visitor = source->GetExecutionContext().HasExecutionVisitor()
++        ? source->GetExecutionContext().GetExecutionVisitorVerified()
++        : nullptr;
++    ui32 filteredRows = source->GetRecordsCount();
++    TString indexStatus = "Unknown";
++    ui32 indexFilteredRows = source->GetRecordsCount();
++    if (visitor && visitor->MutableContext().HasResources()) {
++        const auto& resources = visitor->MutableContext().GetResources();
++        filteredRows = resources.GetRecordsCountActualOptional().value_or(source->GetRecordsCount());
++        if (processorType == NArrow::NSSA::EProcessorType::CheckIndexData) {
++            auto* indexProcessor = dynamic_cast<const NArrow::NSSA::TIndexCheckerProcessor*>(processor.get());
++            if (indexProcessor && source->GetSourceSchemaOptional()) {
++                const auto& idxCtx = indexProcessor->GetIndexContext();
++                NIndexes::NRequest::TOriginalDataAddress addr(idxCtx.GetColumnId(), idxCtx.GetSubColumnName());
++                auto skipIndexes = source->GetSourceSchemaOptional()->GetIndexInfo().FindSkipIndexes(addr, idxCtx.GetOperation());
++                bool hasActualIndexData = false;
++                if (!skipIndexes.empty() && source->HasPortionAccessor()) {
++                    std::set<ui32> indexEntityIds;
++                    for (auto&& skipIdx : skipIndexes) {
++                        indexEntityIds.insert(skipIdx->GetIndexId());
++                    }
++                    hasActualIndexData = source->GetPortionAccessor().GetIndexBlobBytes(indexEntityIds, false) > 0;
++                }
++                if (skipIndexes.empty() || !hasActualIndexData) {
++                    indexStatus = "NoIndex";
++                    indexFilteredRows = source->GetRecordsCount();
++                } else {
++                    const ui32 outputColumnId = indexProcessor->GetOutputColumnIdOnce();
++                    const auto& outputAccessor = resources.GetAccessorOptional(outputColumnId);
++                    if (outputAccessor) {
++                        auto* sparsed = dynamic_cast<const NArrow::NAccessor::TSparsedArray*>(outputAccessor.get());
++                        if (sparsed && sparsed->GetDefaultValue() && sparsed->GetDefaultValue()->is_valid) {
++                            auto* uint8Scalar = dynamic_cast<const arrow::UInt8Scalar*>(sparsed->GetDefaultValue().get());
++                            if (uint8Scalar && uint8Scalar->value == 0) {
++                                indexStatus = "AllDenied";
++                                indexFilteredRows = 0;
++                            } else {
++                                indexStatus = "AllAccepted";
++                                indexFilteredRows = source->GetRecordsCount();
++                            }
++                        } else {
++                            indexStatus = "AllAccepted";
++                            indexFilteredRows = source->GetRecordsCount();
++                        }
++                    } else {
++                        indexStatus = "Partial";
++                        indexFilteredRows = resources.GetFilter().GetFilteredCount().value_or(source->GetRecordsCount());
++                    }
++                }
++            }
++        }
++    }
++
+ #define PROGRAM_PROBE_ARGS                                                                                                            \
+     source->GetDataSourceOrbit(), source->GetRawPathId(), source->GetTabletId(), source->GetTxId(), source->GetDeprecatedPortionId(), \
+         step.GetStepIndex(), tracingName, nodeId, finishDurationMs, executionDurationMs, filteredRows
+-#define PROGRAM_PROBE_RESERVED source->GetReservedMemory()
++#define PROGRAM_PROBE_RESERVED reservedMemory
+ #define PROGRAM_PROBE_TAIL tracingExecutionResult, details
+     switch (processorType) {
+         case NArrow::NSSA::EProcessorType::Const:
+@@ -152,75 +208,28 @@ void TProgramStep::ReportTracing(const std::shared_ptr<IDataSource>& source, con
+                         rawBytes += accessor.GetIndexRawBytes(indexEntityIds, false);
+                     }
+                 }
+-            }
+-            bool hasSubColumns = false;
+-            if (source->GetSourceSchemaOptional()) {
+-                for (auto&& [colId, addr] : fetchProcessor->GetDataAddresses()) {
+-                    if (source->GetSourceSchemaOptional()->GetColumnLoaderVerified(colId)->GetAccessorConstructor()->GetType() ==
+-                        NArrow::NAccessor::IChunkedArray::EType::SubColumnsArray) {
+-                        hasSubColumns = true;
+-                        break;
++                bool hasSubColumns = false;
++                if (source->GetSourceSchemaOptional()) {
++                    for (auto&& [colId, addr] : fetchProcessor->GetDataAddresses()) {
++                        if (source->GetSourceSchemaOptional()->GetColumnLoaderVerified(colId)->GetAccessorConstructor()->GetType() ==
++                            NArrow::NAccessor::IChunkedArray::EType::SubColumnsArray) {
++                            hasSubColumns = true;
++                            break;
++                        }
+                     }
+                 }
+-            }
+-            if (!hasSubColumns) {
+-                source->AddBytesRead(blobBytes);
++                if (!hasSubColumns) {
++                    source->AddBytesRead(blobBytes);
++                }
+             }
+             LWTRACK(ProgramFetchOriginalData, PROGRAM_PROBE_ARGS, blobBytes, rawBytes, PROGRAM_PROBE_RESERVED, PROGRAM_PROBE_TAIL);
+         } break;
+         case NArrow::NSSA::EProcessorType::AssembleOriginalData:
+             LWTRACK(ProgramAssembleOriginalData, PROGRAM_PROBE_ARGS, PROGRAM_PROBE_RESERVED, PROGRAM_PROBE_TAIL);
+             break;
+-        case NArrow::NSSA::EProcessorType::CheckIndexData: {
+-            TString indexStatus = "Unknown";
+-            ui32 indexFilteredRows = source->GetRecordsCount();
+-            auto* indexProcessor = dynamic_cast<const NArrow::NSSA::TIndexCheckerProcessor*>(processor.get());
+-            if (indexProcessor && source->GetSourceSchemaOptional()) {
+-                const auto& idxCtx = indexProcessor->GetIndexContext();
+-                NIndexes::NRequest::TOriginalDataAddress addr(idxCtx.GetColumnId(), idxCtx.GetSubColumnName());
+-                auto skipIndexes = source->GetSourceSchemaOptional()->GetIndexInfo().FindSkipIndexes(addr, idxCtx.GetOperation());
+-                bool hasActualIndexData = false;
+-                if (!skipIndexes.empty() && source->HasPortionAccessor()) {
+-                    std::set<ui32> indexEntityIds;
+-                    for (auto&& skipIdx : skipIndexes) {
+-                        indexEntityIds.insert(skipIdx->GetIndexId());
+-                    }
+-                    hasActualIndexData = source->GetPortionAccessor().GetIndexBlobBytes(indexEntityIds, false) > 0;
+-                }
+-                if (skipIndexes.empty() || !hasActualIndexData) {
+-                    indexStatus = "NoIndex";
+-                    indexFilteredRows = source->GetRecordsCount();
+-                } else {
+-                    // After DoExecute in index.cpp:
+-                    // - AllDenied/AllAccepted: output column stored, filter NOT modified
+-                    // - Partial: no output column, filter modified via AddFilter
+-                    const ui32 outputColumnId = indexProcessor->GetOutputColumnIdOnce();
+-                    const auto& outputAccessor = resources.GetAccessorOptional(outputColumnId);
+-                    if (outputAccessor) {
+-                        // Output column exists → AllDenied or AllAccepted
+-                        auto* sparsed = dynamic_cast<const NArrow::NAccessor::TSparsedArray*>(outputAccessor.get());
+-                        if (sparsed && sparsed->GetDefaultValue() && sparsed->GetDefaultValue()->is_valid) {
+-                            auto* uint8Scalar = dynamic_cast<const arrow::UInt8Scalar*>(sparsed->GetDefaultValue().get());
+-                            if (uint8Scalar && uint8Scalar->value == 0) {
+-                                indexStatus = "AllDenied";
+-                                indexFilteredRows = 0;
+-                            } else {
+-                                indexStatus = "AllAccepted";
+-                                indexFilteredRows = source->GetRecordsCount();
+-                            }
+-                        } else {
+-                            indexStatus = "AllAccepted";
+-                            indexFilteredRows = source->GetRecordsCount();
+-                        }
+-                    } else {
+-                        // No output column → Partial (filter was applied via AddFilter)
+-                        indexStatus = "Partial";
+-                        indexFilteredRows = resources.GetFilter().GetFilteredCount().value_or(source->GetRecordsCount());
+-                    }
+-                }
+-            }
++        case NArrow::NSSA::EProcessorType::CheckIndexData:
+             LWTRACK(ProgramCheckIndexData, PROGRAM_PROBE_ARGS, indexFilteredRows, indexStatus, PROGRAM_PROBE_RESERVED, PROGRAM_PROBE_TAIL);
+-        } break;
++            break;
+         case NArrow::NSSA::EProcessorType::CheckHeaderData:
+             LWTRACK(ProgramCheckHeaderData, PROGRAM_PROBE_ARGS, PROGRAM_PROBE_RESERVED, PROGRAM_PROBE_TAIL);
+             break;
+@@ -228,7 +237,7 @@ void TProgramStep::ReportTracing(const std::shared_ptr<IDataSource>& source, con
+             LWTRACK(ProgramStreamLogic, PROGRAM_PROBE_ARGS, PROGRAM_PROBE_RESERVED, PROGRAM_PROBE_TAIL);
+             break;
+         case NArrow::NSSA::EProcessorType::ReserveMemory:
+-            LWTRACK(ProgramReserveMemory, PROGRAM_PROBE_ARGS, source->GetReservedMemory(), PROGRAM_PROBE_RESERVED, PROGRAM_PROBE_TAIL);
++            LWTRACK(ProgramReserveMemory, PROGRAM_PROBE_ARGS, reservedMemory, PROGRAM_PROBE_RESERVED, PROGRAM_PROBE_TAIL);
+             break;
+         case NArrow::NSSA::EProcessorType::Unknown:
+             break;
+@@ -272,6 +281,8 @@ TConclusion<bool> TProgramStep::DoExecuteInplace(const std::shared_ptr<IDataSour
+         source->MutableExecutionContext().OnStartProgramStepExecution(tracingNodeId, GetSignals(tracingNodeId));
+         auto signals = GetSignals(tracingNodeId);
+ 
++        // Snapshot before Execute(): allocation callbacks may mutate ResourceGuards concurrently afterwards.
++        const ui64 reservedMemoryBeforeExecute = source->GetReservedMemory();
+         const TMonotonic start = TMonotonic::Now();
+         auto conclusion = source->GetExecutionContext().GetExecutionVisitorVerified()->Execute();
+         const TDuration executionDurationMs = TMonotonic::Now() - start;
+@@ -280,11 +291,21 @@ TConclusion<bool> TProgramStep::DoExecuteInplace(const std::shared_ptr<IDataSour
+         source->AddExecutionDuration(executionDurationMs);
+ 
+         const TString currentExecutionResult = conclusion.IsFail() ? "Fail" : ToString(*conclusion);
+-        ReportTracing(source, executionDurationMs, currentExecutionResult, tracingNodeId, tracingCategoryName, tracingProcessor);
++        ReportTracing(source, executionDurationMs, currentExecutionResult, tracingNodeId, tracingCategoryName, tracingProcessor,
++            reservedMemoryBeforeExecute);
+         if (conclusion.IsFail()) {
+             source->MutableExecutionContext().OnFailedProgramStepExecution();
+             return conclusion;
+-        } else if (*conclusion == NArrow::NSSA::IResourceProcessor::EExecutionResult::InBackground) {
++        }
++
++        // A nested continuation may have finished the shared program (extracted resources / stopped visitor)
++        // while Execute() was in progress. Do not keep mutating that shared state from this frame.
++        if (!source->GetExecutionContext().HasExecutionVisitor() ||
++            !source->GetExecutionContext().GetExecutionVisitorVerified()->MutableContext().HasResources()) {
++            return false;
++        }
++
++        if (*conclusion == NArrow::NSSA::IResourceProcessor::EExecutionResult::InBackground) {
+             return false;
+         }
+         source->MutableExecutionContext().OnFinishProgramStepExecution();
+@@ -296,9 +317,15 @@ TConclusion<bool> TProgramStep::DoExecuteInplace(const std::shared_ptr<IDataSour
+         }
+     }
+     FOR_DEBUG_LOG(NKikimrServices::COLUMNSHARD_SCAN_EVLOG, source->AddEvent("fgraph"));
++    if (!source->GetExecutionContext().HasExecutionVisitor() ||
++        !source->GetExecutionContext().GetExecutionVisitorVerified()->MutableContext().HasResources()) {
++        // Nested continuation already took ownership of progress — do not advance this cursor.
++        return false;
++    }
+     YDB_LOG_DEBUG_COMP(NKikimrServices::SSA_GRAPH_EXECUTION, "",
+         {"graphConstructed", Program->DebugDOT(source->GetExecutionContext().GetExecutionVisitorVerified()->GetExecutedIds())});
+-    source->MutableStageData().ReturnTable(source->GetExecutionContext().GetExecutionVisitorVerified()->MutableContext().ExtractResources());
++    source->MutableStageData().ReturnTable(
++        source->GetExecutionContext().GetExecutionVisitorVerified()->MutableContext().ExtractResources());
+ 
+     return true;
+ }
+diff --git a/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/fetching.h b/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/fetching.h
+index 6e4e3222aa0..431bb634b7f 100644
+--- a/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/fetching.h
++++ b/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/fetching.h
+@@ -80,7 +80,8 @@ private:
+     THashMap<ui32, std::shared_ptr<TFetchingStepSignals>> Signals;
+     const std::shared_ptr<TFetchingStepSignals>& GetSignals(const ui32 nodeId) const;
+     void ReportTracing(const std::shared_ptr<IDataSource>& source, const TDuration executionDurationMs, const TString& currentExecutionResult,
+-        const ui32 nodeId, const TString& currentCategoryName, const std::shared_ptr<NArrow::NSSA::IResourceProcessor>& processor) const;
++        const ui32 nodeId, const TString& currentCategoryName, const std::shared_ptr<NArrow::NSSA::IResourceProcessor>& processor,
++        const ui64 reservedMemory) const;
+ 
+ public:
+     virtual TConclusion<bool> DoExecuteInplace(const std::shared_ptr<IDataSource>& source, const TFetchingScriptCursor& step) const override;
+diff --git a/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/source.h b/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/source.h
+index 30c9646fe25..b6d0981ee0b 100644
+--- a/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/source.h
++++ b/ydb/core/tx/columnshard/engines/reader/common_reader/iterator/source.h
+@@ -65,6 +65,10 @@ public:
+         return !!ProgramIterator;
+     }
+ 
++    bool HasExecutionVisitor() const {
++        return !!ExecutionVisitor;
++    }
++
+     void SetProgramIterator(const std::shared_ptr<NArrow::NSSA::NGraph::NExecution::TCompiledGraph::TIterator>& it,
+         const std::shared_ptr<NArrow::NSSA::NGraph::NExecution::TExecutionVisitor>& visitor);
+ 
+diff --git a/ydb/core/tx/columnshard/engines/reader/simple_reader/iterator/source.cpp b/ydb/core/tx/columnshard/engines/reader/simple_reader/iterator/source.cpp
+index 550560f6ca3..a1279b44eec 100644
+--- a/ydb/core/tx/columnshard/engines/reader/simple_reader/iterator/source.cpp
++++ b/ydb/core/tx/columnshard/engines/reader/simple_reader/iterator/source.cpp
+@@ -6,6 +6,7 @@
+ #include <ydb/core/tx/columnshard/blobs_reader/actor.h>
+ #include <ydb/core/tx/columnshard/engines/portions/data_accessor.h>
+ #include <ydb/core/tx/columnshard/engines/portions/written.h>
++#include <ydb/core/tx/columnshard/engines/reader/common/scan_memory_limiter.h>
+ #include <ydb/core/tx/columnshard/engines/reader/common_reader/common/accessor_callback.h>
+ #include <ydb/core/tx/columnshard/engines/reader/common_reader/iterator/constructor.h>
+ #include <ydb/core/tx/columnshard/engines/reader/common_reader/iterator/default_fetching.h>
+@@ -507,10 +508,12 @@ TConclusion<bool> TPortionDataSource::DoStartReserveMemory(const NArrow::NSSA::T
+         result.GetBlobsSize(), result.GetRawSize(), GetContext()->GetReadMetadata()->GetLimitRobustOptional(), GetRecordsCount());
+ 
+     auto allocation = std::make_shared<NCommon::TAllocateMemoryStep::TFetchingStepAllocation>(
+-        source, sizeToReserve, GetExecutionContext().GetCursorStep(), policy->GetStage(), false);
++        source, sizeToReserve, GetExecutionContext().GetCursorStep(), policy->GetStage(), false /*needNextStep*/,
++        IsScanMemoryLimiterEnabled(GetContext()->GetCommonContext()->GetReadMetadataPtrVerifiedAs<NCommon::TReadMetadata>()->GetGroupedMemoryLimiterOperator()) /*scheduleContinuation*/);
+     FOR_DEBUG_LOG(NKikimrServices::COLUMNSHARD_SCAN_EVLOG, AddEvent("mr"));
+-    GetContext()->SendToGroupedMemoryAllocation(GetMemoryGroupId(), { allocation }, (ui32)policy->GetStage());
+-    return true;
++    // When the limiter is disabled, OnAllocated runs inline and only registers the guard (no nested TStepAction).
++    // Return false so the program continues on this stack instead of racing with a concurrent continuation.
++    return GetContext()->SendToGroupedMemoryAllocation(GetMemoryGroupId(), { allocation }, (ui32)policy->GetStage());
+ }
+ 
+ bool TPortionDataSource::DoAddTxConflict() {
+diff --git a/ydb/core/tx/columnshard/engines/reader/trivial_reader/iterator/source.cpp b/ydb/core/tx/columnshard/engines/reader/trivial_reader/iterator/source.cpp
+index 4181f253c51..642571ace34 100644
+--- a/ydb/core/tx/columnshard/engines/reader/trivial_reader/iterator/source.cpp
++++ b/ydb/core/tx/columnshard/engines/reader/trivial_reader/iterator/source.cpp
+@@ -6,6 +6,7 @@
+ #include <ydb/core/tx/columnshard/blobs_reader/actor.h>
+ #include <ydb/core/tx/columnshard/engines/portions/data_accessor.h>
+ #include <ydb/core/tx/columnshard/engines/portions/written.h>
++#include <ydb/core/tx/columnshard/engines/reader/common/scan_memory_limiter.h>
+ #include <ydb/core/tx/columnshard/engines/reader/common_reader/common/accessor_callback.h>
+ #include <ydb/core/tx/columnshard/engines/reader/common_reader/iterator/constructor.h>
+ #include <ydb/core/tx/columnshard/engines/reader/common_reader/iterator/default_fetching.h>
+@@ -507,10 +508,12 @@ TConclusion<bool> TPortionDataSource::DoStartReserveMemory(const NArrow::NSSA::T
+         result.GetBlobsSize(), result.GetRawSize(), GetContext()->GetReadMetadata()->GetLimitRobustOptional(), GetRecordsCount());
+ 
+     auto allocation = std::make_shared<NCommon::TAllocateMemoryStep::TFetchingStepAllocation>(
+-        source, sizeToReserve, GetExecutionContext().GetCursorStep(), policy->GetStage(), false);
++        source, sizeToReserve, GetExecutionContext().GetCursorStep(), policy->GetStage(), false /*needNextStep*/,
++        IsScanMemoryLimiterEnabled(GetContext()->GetCommonContext()->GetReadMetadataPtrVerifiedAs<NCommon::TReadMetadata>()->GetGroupedMemoryLimiterOperator()) /*scheduleContinuation*/);
+     FOR_DEBUG_LOG(NKikimrServices::COLUMNSHARD_SCAN_EVLOG, AddEvent("mr"));
+-    GetContext()->SendToGroupedMemoryAllocation(GetMemoryGroupId(), { allocation }, (ui32)policy->GetStage());
+-    return true;
++    // When the limiter is disabled, OnAllocated runs inline and only registers the guard (no nested TStepAction).
++    // Return false so the program continues on this stack instead of racing with a concurrent continuation.
++    return GetContext()->SendToGroupedMemoryAllocation(GetMemoryGroupId(), { allocation }, (ui32)policy->GetStage());
+ }
+ 
+ bool TPortionDataSource::DoAddTxConflict() {

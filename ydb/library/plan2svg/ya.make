@@ -5,3 +5,7 @@ SRCS(
 )
 
 END()
+
+RECURSE(
+    bin
+)
