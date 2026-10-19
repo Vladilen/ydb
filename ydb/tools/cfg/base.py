@@ -145,7 +145,20 @@ Domain = collections.namedtuple(
 )
 
 KiKiMRHost = collections.namedtuple(
-    "_KiKiMRHost", ["hostname", "node_id", "drives", "ic_port", "body", "datacenter", "module", "rack", "host_config_id", "port"]
+    "_KiKiMRHost",
+    [
+        "hostname",
+        "node_id",
+        "drives",
+        "ic_port",
+        "body",
+        "datacenter",
+        "module",
+        "rack",
+        "host_config_id",
+        "port",
+        "interconnect_hostname",
+    ],
 )
 
 DEFAULT_PLAN_RESOLUTION = 10
@@ -495,8 +508,9 @@ class ClusterDetailsProvider(object):
         return drives
 
     def __collect_host_info(self, node_id, host_description):
+        identity = host_description.get("name") or host_description.get("host")
         return KiKiMRHost(
-            hostname=host_description.get("name", host_description.get("host")),
+            hostname=identity,
             node_id=host_description.get("node_id", node_id),
             drives=self._collect_drives_info(host_description),
             ic_port=host_description.get("ic_port", DEFAULT_INTERCONNECT_PORT),
@@ -506,6 +520,7 @@ class ClusterDetailsProvider(object):
             rack=self._get_rack(host_description),
             host_config_id=host_description.get("host_config_id", None),
             port=host_description.get("port", DEFAULT_INTERCONNECT_PORT),
+            interconnect_hostname=host_description.get("interconnect_host") or identity,
         )
 
     @property

@@ -80,6 +80,9 @@ Example, update only kikimr binary:
 Example, update only kikimr configs:
     %(prog)s update cluster.yaml kikimr=cfg --arcadia
 
+Example, update configs and leave the ydbd binary on the nodes unchanged:
+    %(prog)s update cluster.yaml all --process-profiles
+
 Example, install part by part:
     %(prog)s install cluster.yaml kikimr --arcadia
     %(prog)s install cluster.yaml dynamic_slots --arcadia
@@ -394,6 +397,24 @@ def arcadia_root(begin_path='.'):
             return path
         path = os.path.dirname(path)
     sys.exit("unable to find arcadia root")
+
+
+def binary_was_specified(args):
+    return bool(getattr(args, 'binary', None) or getattr(args, 'arcadia', False))
+
+
+def omit_binary_deploy(components, binary_specified):
+    """Drop kikimr bin from an install or update that also refreshes configs.
+
+    Explicit ``kikimr=bin`` still requires a binary. ``all`` and ``kikimr``
+    without ``--binary``/``--arcadia`` leave the binary already on the nodes.
+    """
+    kikimr_parts = list(components.get('kikimr') or [])
+    if binary_specified or 'bin' not in kikimr_parts or 'cfg' not in kikimr_parts:
+        return components
+    updated = dict(components)
+    updated['kikimr'] = [part for part in kikimr_parts if part != 'bin']
+    return updated
 
 
 def deduce_kikimr_bin_from_args(args):
@@ -716,6 +737,13 @@ def dispatch_run(func, args, walle_provider, need_confirmation=False):
 
     # Always compute components after cluster_details
     components = deduce_components_from_args(args, cluster_details)
+    if func in (handlers.Slice.slice_update, handlers.Slice.slice_install):
+        relaxed = omit_binary_deploy(components, binary_was_specified(args))
+        if relaxed is not components:
+            logger.info(
+                "ydbd binary is not specified, leaving the binary on the nodes unchanged"
+            )
+            components = relaxed
 
     # Call deduce_kikimr_bin_from_args only if needed
     # Skip binary check for the clear command while keeping it for others
@@ -729,6 +757,21 @@ def dispatch_run(func, args, walle_provider, need_confirmation=False):
     yav_version = v.get('yav_version')
 
     nodes = deduce_nodes_from_args(args, configurator.hosts_names, args.ssh_user, args.ssh_key_path)
+    needs_remote_ydbd = (
+        func == handlers.Slice.slice_update
+        and kikimr_bin is None
+        and not getattr(args, 'yaml_config', None)
+        and cluster_description.template_needs_ydbd_binary(cluster_details.template)
+    )
+    if needs_remote_ydbd and hasattr(configurator, 'set_ydbd_runner'):
+        logger.info(
+            "generating blobstorage config with ydbd already installed on the cluster; the binary will not be replaced"
+        )
+        cluster_nodes = nodes
+        remote_bin = handlers.Slice.slice_kikimr_path
+        configurator.set_ydbd_runner(
+            lambda argv, cluster_nodes=cluster_nodes, remote_bin=remote_bin: cluster_nodes.run_ydbd(remote_bin, argv)
+        )
     slice = handlers.Slice(
         components,
         nodes,
@@ -810,9 +853,11 @@ def add_update_mode(modes, walle_provider):
             log_args(),
             ssh_args(),
         ],
-        description="Minor cluster update, just binary and cfg. No additional configuration is performed."
+        description="Minor cluster update, just binary and cfg. No additional configuration is performed. "
         "Stop all ydbd instances at the nodes, sync binary and cfg, start the instances. "
-        "Use --hosts to specify particular hosts.",
+        "Use --hosts to specify particular hosts. "
+        "Without --binary and --arcadia only configs are updated and the ydbd binary on the nodes is left unchanged. "
+        "A passed --binary is copied only when its contents differ.",
     )
     mode.set_defaults(handler=_run)
 

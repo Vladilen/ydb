@@ -27,6 +27,7 @@ HOST_SLICE_ONLY_KEYS = (
     'dynamic_slots',
     'storage_profile',
     'dynamic_profiles',
+    'skip_host',
 )
 
 _SAFE_ID_RE = re.compile(r'[^A-Za-z0-9._-]+')

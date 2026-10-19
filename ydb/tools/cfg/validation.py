@@ -188,6 +188,7 @@ HOST_SCHEMA = {
         },
         "node_id": {"type": "integer", "minLength": 1},
         "host": {"type": "string", "minLength": 1},
+        "interconnect_host": {"type": "string", "minLength": 1},
         "dynamic_slots": {"type": "integer", "minimum": 0},
         "storage": {"type": "boolean"},
         "storage_profile": {
@@ -205,8 +206,11 @@ HOST_SCHEMA = {
                 ],
             },
         },
+        "skip_host": {"type": "boolean"},
     },
-    "oneOf": [
+    # anyOf: at least one identity. name and host may both be set
+    # (SSH target vs the hostname the process sees inside the box).
+    "anyOf": [
         {
             "additionalProperties": False
         },

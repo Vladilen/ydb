@@ -162,7 +162,14 @@ class YamlConfigurator(object):
 
     @property
     def hosts_names(self):
-        return [host['host'] for host in self.static_config_dict.get('hosts', [])]
+        names = []
+        for host in self.static_config_dict.get('hosts', []):
+            if host.get('skip_host'):
+                continue
+            hostname = host.get('host') or host.get('name')
+            if hostname:
+                names.append(hostname)
+        return names
 
     @property
     def hosts_ports(self):

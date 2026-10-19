@@ -1,9 +1,11 @@
 import os
+import shlex
 import sys
 import logging
 import subprocess
 import queue
 import random
+from collections import defaultdict
 
 
 logger = logging.getLogger(__name__)
@@ -121,6 +123,78 @@ class Nodes(object):
     def execute_async(self, cmd, check_retcode=True, nodes=None, results=None, retry_attempts=5):
         running_jobs = self.execute_async_ret(cmd, check_retcode, nodes, results)
         self._check_async_execution(running_jobs, check_retcode, results, retry_attempts=retry_attempts)
+
+    def execute_per_node(self, jobs, check_retcode=True, results=None, retry_attempts=5):
+        """Run ``(cmd, host)`` jobs together.
+
+        Hosts that share a command are one ssh wave. Different commands are
+        started before any of them is waited on, same as ``execute_async``
+        across the node list.
+        """
+        if not jobs:
+            return
+        grouped = defaultdict(list)
+        order = []
+        for cmd, host in jobs:
+            if cmd not in grouped:
+                order.append(cmd)
+            grouped[cmd].append(host)
+        running_jobs = []
+        for cmd in order:
+            running_jobs.extend(
+                self.execute_async_ret(cmd, nodes=grouped[cmd], results=results)
+            )
+        self._check_async_execution(running_jobs, check_retcode, results, retry_attempts=retry_attempts)
+
+    def _run_capture(self, host, cmd):
+        self._logger.info("execute '%s' at '%s'", cmd, host)
+        if self._dry_run:
+            return b''
+        actual_cmd = self._get_ssh_command_prefix() + [host, cmd]
+        process = subprocess.Popen(actual_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out, err = process.communicate()
+        if process.returncode != 0:
+            self._logger.error(
+                "command failed on %s, stderr:\n%s",
+                host,
+                err.decode('utf-8', errors='replace'),
+            )
+            raise subprocess.CalledProcessError(process.returncode, actual_cmd, output=out)
+        return out
+
+    def run_ydbd(self, remote_bin, argv):
+        """Run ydbd on the first node and return stdout bytes.
+
+        ``argv[0]`` is a local binary path and is replaced with ``remote_bin``.
+        A local ``--bs-format-file`` is uploaded for the remote process.
+        """
+        host = self._nodes[0]
+        args = list(argv[1:])
+        remote_tmp = None
+        if '--bs-format-file' in args:
+            idx = args.index('--bs-format-file')
+            local_path = args[idx + 1]
+            remote_tmp = '/tmp/ydbd_slice_bs_format_{}_{}'.format(os.getpid(), random.randint(0, 10 ** 6))
+            args[idx + 1] = remote_tmp
+            self._copy_on_node(local_path, host, remote_tmp)
+            self.execute_async(
+                'sudo chmod 644 {}'.format(shlex.quote(remote_tmp)),
+                nodes=[host],
+                check_retcode=False,
+            )
+        cmd = 'sudo ' + ' '.join([shlex.quote(remote_bin)] + [shlex.quote(arg) for arg in args])
+        try:
+            if self._dry_run:
+                self._logger.info("dry-run: would run on %s: %s", host, cmd)
+                raise RuntimeError("dry-run cannot generate blobstorage config without a local --binary")
+            return self._run_capture(host, cmd)
+        finally:
+            if remote_tmp is not None:
+                self.execute_async(
+                    'sudo rm -f {}'.format(shlex.quote(remote_tmp)),
+                    nodes=[host],
+                    check_retcode=False,
+                )
 
     def _copy_on_node(self, local_path, host, remote_path):
         self._logger.info(

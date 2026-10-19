@@ -60,11 +60,13 @@ class StaticConfigGenerator(object):
         skip_location=False,
         schema_validator=None,
         grpcs_port=None,
+        ydbd_runner=None,
         **kwargs
     ):
         self.__proto_configs = {}
         self.__binary_path = binary_path
         self.__local_binary_path = local_binary_path or binary_path
+        self.__ydbd_runner = ydbd_runner
         self.__output_dir = output_dir
 
         self._host_info_provider = host_info_provider
@@ -1488,7 +1490,7 @@ class StaticConfigGenerator(object):
             ]
 
             try:
-                output = subprocess.check_output(
+                output = self._invoke_ydbd(
                     cmd_base + [
                         "--ring-level-begin",
                         str(rx_begin),
@@ -1501,7 +1503,7 @@ class StaticConfigGenerator(object):
                     ]
                 )
             except subprocess.CalledProcessError:
-                output = subprocess.check_output(
+                output = self._invoke_ydbd(
                     cmd_base + [
                         "--dx",
                         fail_domain_type,
@@ -1511,6 +1513,13 @@ class StaticConfigGenerator(object):
         utils.read_message_from_string(output, result)
 
         return result
+
+    def _invoke_ydbd(self, cmd):
+        if self.__ydbd_runner is not None:
+            return self.__ydbd_runner(cmd)
+        if not self.__local_binary_path:
+            raise RuntimeError("ydbd binary is required to generate static blobstorage config")
+        return subprocess.check_output(cmd)
 
     def __generate_channels_txt(self):
         self.__proto_configs["channels.txt"] = config_pb2.TChannelProfileConfig()
@@ -1940,11 +1949,12 @@ class StaticConfigGenerator(object):
             port = host.port
             if port is base.DEFAULT_INTERCONNECT_PORT:
                 port = host.ic_port
+            interconnect = getattr(host, "interconnect_hostname", None) or host.hostname
             node = self.names_txt.Node.add(
                 NodeId=host.node_id,
                 Port=port,
                 Host=host.hostname,
-                InterconnectHost=host.hostname,
+                InterconnectHost=interconnect,
             )
 
             if not self._skip_location:

@@ -1,3 +1,4 @@
+import hashlib
 import os
 import time
 import logging
@@ -23,7 +24,17 @@ class CalledProcessError(subprocess.CalledProcessError):
         )
 
 
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as binary:
+        for chunk in iter(lambda: binary.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 class Slice:
+    slice_kikimr_path = '/Berkanavt/kikimr/bin/kikimr'
+
     def __init__(
         self,
         components,
@@ -36,7 +47,6 @@ class Slice:
         walle_provider=None,
         configurator=None,
     ):
-        self.slice_kikimr_path = '/Berkanavt/kikimr/bin/kikimr'
         self.__slice_cfg_path = '/Berkanavt/kikimr/cfg'
         self.__slice_tenants_path = '/Berkanavt/tenants'
         self.slice_secrets_path = '/Berkanavt/kikimr/token'
@@ -97,9 +107,15 @@ class Slice:
                 result.append((host.hostname, drive.path))
         return result
 
+    def _ssh_hosts(self, hosts):
+        allowed = set(self.nodes.nodes_list)
+        return [host for host in hosts if host in allowed]
+
     def _format_drives(self):
         tasks = []
         for (host_name, drive_path) in self._get_all_drives():
+            if host_name not in set(self.nodes.nodes_list):
+                continue
             cmd = "sudo {} admin bs disk obliterate {}".format(self.slice_kikimr_path, drive_path)
             tasks.extend(self.nodes.execute_async_ret(cmd, nodes=[host_name]))
         self.nodes._check_async_execution(tasks)
@@ -107,11 +123,17 @@ class Slice:
     def _set_locations(self):
         # Set location for each group of hosts sharing the same datacenter
         for datacenter, hosts in self.configurator.group_hosts_by_datacenter.items():
+            hosts = self._ssh_hosts(hosts)
+            if not hosts:
+                continue
             cmd = "sudo sh -c 'echo {} > {}/location'".format(datacenter, self.slice_tenants_path)
             self.nodes.execute_async(cmd, nodes=hosts)
 
         # Set bridge-pile for each group of hosts sharing the same pile
         for pile, hosts in self.configurator.group_hosts_by_bridge_pile.items():
+            hosts = self._ssh_hosts(hosts)
+            if not hosts:
+                continue
             cmd = "sudo sh -c 'echo {} > {}/bridge-pile'".format(pile, self.slice_tenants_path)
             self.nodes.execute_async(cmd, nodes=hosts)
 
@@ -303,7 +325,7 @@ class Slice:
 
         return (slots_per_domain, all_available_slots_count, )
 
-    def _deploy_slot_config_for_tenant(self, slot, tenant, node):
+    def _slot_deploy_command(self, slot, tenant, node):
         slot_dir = "/Berkanavt/kikimr_{slot}".format(slot=slot.slot)
         logs_dir = slot_dir + "/logs"
         slot_cfg = slot_dir + "/slot_cfg"
@@ -325,28 +347,37 @@ mon={mon}""".format(
         )
 
         escaped_cmd = cfg.encode('unicode_escape').decode()
+        profile_id = self._profile_id_for_slot(node, slot)
+        copy = ""
+        if profile_id:
+            src = os.path.join(self.slice_cfg_path, process_profiles.profile_yaml_filename(profile_id))
+            dst = slot_dir + "/config.yaml"
+            copy = " cp {src} {dst};".format(src=src, dst=dst)
 
-        cmd = "sudo sh -c 'mkdir -p {logs_dir}; sudo chown syslog {logs_dir}; touch {env_txt}; /bin/echo -e \"{cfg}\" > {slot_cfg};'".format(
+        return (
+            "sudo sh -c 'mkdir -p {logs_dir}; sudo chown syslog {logs_dir}; "
+            "touch {env_txt}; /bin/echo -e \"{cfg}\" > {slot_cfg};{copy}'"
+        ).format(
             logs_dir=logs_dir,
             env_txt=env_txt,
             cfg=escaped_cmd,
             slot_cfg=slot_cfg,
+            copy=copy,
         )
 
-        self.nodes.execute_async(cmd, check_retcode=False, nodes=[node])
-
-        profile_id = self._profile_id_for_slot(node, slot)
-        if profile_id:
-            src = os.path.join(self.slice_cfg_path, process_profiles.profile_yaml_filename(profile_id))
-            dst = slot_dir + "/config.yaml"
-            copy_cmd = "sudo cp {src} {dst}".format(src=src, dst=dst)
-            self.nodes.execute_async(copy_cmd, check_retcode=False, nodes=[node])
+    def _deploy_slot_config_for_tenant(self, slot, tenant, node):
+        self.nodes.execute_async(
+            self._slot_deploy_command(slot, tenant, node),
+            check_retcode=False,
+            nodes=[node],
+        )
 
     def _deploy_slot_configs(self):
         if 'dynamic_slots' not in self.components:
             return
 
         slots_per_domain = self._get_available_slots()[0]
+        jobs = []
         for domain in self.cluster_details.domains:
             slots_taken = set()
             available_slots_per_zone = slots_per_domain[domain.domain_name]
@@ -360,11 +391,13 @@ mon={mon}""".format(
                                 if (slot, node) in slots_taken:
                                     continue
                                 slots_taken.add((slot, node))
-                                self._deploy_slot_config_for_tenant(slot, tenant, node)
+                                jobs.append((self._slot_deploy_command(slot, tenant, node), node))
                                 break
                         except IndexError:
                             logger.critical('insufficient slots allocated')
+                            self.nodes.execute_per_node(jobs, check_retcode=False)
                             return
+        self.nodes.execute_per_node(jobs, check_retcode=False)
 
     def _start_slot(self, slot):
         cmd = "sudo sh -c \"if [ -x /sbin/start ]; "\
@@ -379,7 +412,7 @@ mon={mon}""".format(
             )
         self.nodes.execute_async(self, cmd, check_retcode=False)
 
-    def _start_slot_for_tenant(self, slot, tenant, host, node_bind=None):
+    def _start_slot_command(self, slot, tenant, node_bind=None):
         cmd = "sudo sh -c \"if [ -x /sbin/start ]; "\
             "    then start kikimr-multi slot={slot} tenant=/{domain}/{name} mbus={mbus} grpc={grpc} mon={mon} ic={ic} kafka_port={kafka_port}; "\
             "    else systemctl start kikimr-multi@{slot}; fi\"".format(
@@ -394,7 +427,14 @@ mon={mon}""".format(
             )
         if node_bind is not None:
             cmd += " bindnumanode={bind}".format(bind=node_bind)
-        self.nodes.execute_async(cmd, check_retcode=False, nodes=[host])
+        return cmd
+
+    def _start_slot_for_tenant(self, slot, tenant, host, node_bind=None):
+        self.nodes.execute_async(
+            self._start_slot_command(slot, tenant, node_bind),
+            check_retcode=False,
+            nodes=[host],
+        )
 
     def _start_all_slots(self):
         cmd = "find /Berkanavt/ -maxdepth 1 -type d  -name kikimr_* " \
@@ -432,6 +472,7 @@ mon={mon}""".format(
             numa_nodes_counters = {node: 0 for node in self.nodes.nodes_list}
 
             (slots_per_domain, all_available_slots_count,) = self._get_available_slots()
+            jobs = []
 
             for domain in self.cluster_details.domains:
 
@@ -451,23 +492,24 @@ mon={mon}""".format(
                                     if (slot, node) in slots_taken:
                                         continue
                                     slots_taken.add((slot, node))
+                                    node_bind = None
                                     if domain.bind_slots_to_numa_nodes and numa_nodes and numa_nodes[node] > 0:
-                                        self._start_slot_for_tenant(
-                                            slot,
-                                            tenant,
-                                            host=node,
-                                            node_bind=numa_nodes_counters[node]
-                                        )
+                                        node_bind = numa_nodes_counters[node]
                                         numa_nodes_counters[node] += 1
                                         numa_nodes_counters[node] %= numa_nodes[node]
-                                    else:
-                                        self._start_slot_for_tenant(slot, tenant, host=node)
+                                    jobs.append((
+                                        self._start_slot_command(slot, tenant, node_bind),
+                                        node,
+                                    ))
                                     break
                             except IndexError:
                                 logger.critical('insufficient slots allocated')
+                                self.nodes.execute_per_node(jobs, check_retcode=False)
                                 return
 
                 logger.warning('{count} unused slots'.format(count=all_available_slots_count - len(slots_taken)))
+
+            self.nodes.execute_per_node(jobs, check_retcode=False)
 
     def slice_start(self):
         if 'kikimr' in self.components:
@@ -517,7 +559,34 @@ mon={mon}""".format(
         if 'kikimr' in self.components:
             self._stop_static()
 
+    def _deployed_binary_matches(self):
+        if not self.bin or not os.path.isfile(self.bin):
+            return False
+        if self.bin.startswith(('rbtorrent:', 'sbr:', 'script:', 'http:', 'https:')):
+            return False
+        local_digest = _file_sha256(self.bin)
+        results = {}
+        self.nodes.execute_async(
+            "sudo sha256sum {}".format(self.slice_kikimr_path),
+            check_retcode=False,
+            results=results,
+            retry_attempts=0,
+        )
+        if len(results) != len(self.nodes.nodes_list):
+            return False
+        for host in self.nodes.nodes_list:
+            result = results.get(host) or {}
+            if result.get('retcode') != 0:
+                return False
+            parts = (result.get('stdout') or '').split()
+            if not parts or parts[0] != local_digest:
+                return False
+        return True
+
     def _update_kikimr(self):
+        if self._deployed_binary_matches():
+            logger.info("ydbd on the nodes matches %s, skip binary update", self.bin)
+            return
         bin_directory = os.path.dirname(self.bin)
         self.nodes.copy(self.bin, self.slice_kikimr_path, compressed_path=self.compressed_bin)
         for lib in ['libiconv.so', 'liblibaio-dynamic.so', 'liblibidn-dynamic.so']:
@@ -535,7 +604,11 @@ mon={mon}""".format(
             return
         if self.v2:
             return
+        reachable = set(self.nodes.nodes_list)
+        jobs = []
         for host, profile_id in self._host_storage_profile.items():
+            if host not in reachable:
+                continue
             filename = process_profiles.profile_yaml_filename(profile_id)
             cfg_file = os.path.join(self.slice_cfg_path, 'kikimr.cfg')
             cmd = (
@@ -543,7 +616,8 @@ mon={mon}""".format(
                 "|--yaml-config ${kikimr_config}/%s|' %s"
                 % (filename, cfg_file)
             )
-            self.nodes.execute_async(cmd, nodes=[host])
+            jobs.append((cmd, host))
+        self.nodes.execute_per_node(jobs)
 
     def _deploy_secrets(self):
         if not self.yav_version:

@@ -14,4 +14,5 @@ RECURSE(
     tsserver
     tstool
     ydbd_slice
+    deploy_ydbd_slice
 )

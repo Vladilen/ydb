@@ -1,3 +1,4 @@
+import logging
 import os
 import random
 from collections import namedtuple
@@ -8,8 +9,10 @@ import yaml
 from ydb.tools.cfg.base import ClusterDetailsProvider
 from ydb.tools.cfg.dynamic import DynamicConfigGenerator
 from ydb.tools.cfg.static import StaticConfigGenerator
-from ydb.tools.cfg.utils import write_to_file
+from ydb.tools.cfg.utils import need_generate_bs_config, write_to_file
 from ydb.tools.ydbd_slice import process_profiles
+
+logger = logging.getLogger(__name__)
 
 
 # --- Add custom loader for duplicate key detection ---
@@ -78,7 +81,21 @@ class ClusterDetails(ClusterDetailsProvider):
 
     @property
     def hosts_names(self):
-        return sorted(list(set(node.hostname for node in self.hosts)))
+        """Hosts ydbd_slice may ssh to.
+
+        ``skip_host: true`` keeps the host in the generated YDB config (node id,
+        disks, nameservice) and drops it from install/update.
+        """
+        names = []
+        skipped = []
+        for hostname, host in self._iter_host_yaml():
+            if host.get('skip_host'):
+                skipped.append(hostname)
+                continue
+            names.append(hostname)
+        if skipped:
+            logger.info("skip ssh to hosts with skip_host: %s", skipped)
+        return sorted(set(names))
 
     def _iter_host_yaml(self):
         for host in self.template.get('hosts', []):
@@ -183,6 +200,13 @@ def make_dir(dir):
     assert os.path.isdir(dir)
 
 
+def template_needs_ydbd_binary(template):
+    """True when static config generation shells out to ``ydbd admin bs genconfig``."""
+    if template.get('static_groups'):
+        return True
+    return need_generate_bs_config(template.get('blob_storage_config'))
+
+
 class Configurator(object):
     RANDOM_SEED = 100
 
@@ -205,6 +229,11 @@ class Configurator(object):
         self.__subdomains = None
         self.__walle_provider = walle_provider
         self.enable_process_profiles = False
+        self.__ydbd_runner = None
+
+    def set_ydbd_runner(self, runner):
+        self.__ydbd_runner = runner
+        self.__static = None
 
     @property
     def kikimr_bin(self):
@@ -284,10 +313,14 @@ class Configurator(object):
 
     @property
     def static(self):
-        assert self.__kikimr_bin_file
-
         if self.__static is None:
-            self.__static = StaticConfigGenerator(self.template, self.__kikimr_bin_file, self.__static_cfg, walle_provider=self.__walle_provider)
+            self.__static = StaticConfigGenerator(
+                self.template,
+                self.__kikimr_bin_file,
+                self.__static_cfg,
+                walle_provider=self.__walle_provider,
+                ydbd_runner=self.__ydbd_runner,
+            )
         return self.__static
 
     def create_static_cfg(self):
