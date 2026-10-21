@@ -218,12 +218,15 @@ class Slice:
                 )
 
     def __init_blobstorage_kikimr(self):
-        host = self.nodes.nodes_list[0]
+        # One cluster transaction, not a per-node action. A second copy races
+        # the first: DefineBox commits, ItemConfigGeneration becomes 1, and the
+        # other copies are rejected with ItemConfigGenerationExpected.
+        hosts = (self._storage_hosts() or self.nodes.nodes_list)[:1]
         cmd = (
             f"{self.slice_kikimr_path} admin blobstorage config init "
             f"--yaml-file {self.slice_cfg_path}/config.yaml"
         )
-        blobstorage_init.run_blobstorage_config_init_with_retry(self.nodes, host, cmd)
+        blobstorage_init.run_blobstorage_config_init_with_retry(self.nodes, hosts, cmd)
 
     def __cluster_bootstrap(self):
         try:

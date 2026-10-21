@@ -5,6 +5,8 @@ from unittest import TestCase, mock
 
 import ydb.tools.ydbd_slice as ydbd_slice_tool
 from ydb.tools.cfg.static import StaticConfigGenerator
+from ydb.tools.ydbd_slice import blobstorage_init
+from ydb.tools.ydbd_slice import blobstorage_init
 from ydb.tools.ydbd_slice import cluster_description
 from ydb.tools.ydbd_slice import handlers
 from ydb.tools.ydbd_slice import nodes
@@ -89,6 +91,36 @@ static_erasure: none
                 'vla-1.search.yandex.net': 2,
             },
         )
+
+    def test_init_blobstorage_runs_storage_hosts_together(self):
+        storage_a = 'olap-1.search.yandex.net'
+        storage_b = 'olap-2.search.yandex.net'
+        compute = 'vla-1.search.yandex.net'
+        cluster_details = SimpleNamespace(
+            hosts=[],
+            grpc_config={'port': 2135},
+            host_dynamic_slot_counts={},
+            host_storage_enabled={compute: False},
+            host_storage_profile={},
+            host_dynamic_profiles={},
+        )
+
+        with mock.patch.object(handlers.config_client, 'ConfigClient'):
+            slice_obj = handlers.Slice(
+                {'kikimr': ['cfg']},
+                nodes.Nodes([storage_a, compute, storage_b]),
+                cluster_details,
+            )
+
+        with mock.patch.object(
+            blobstorage_init,
+            'run_blobstorage_config_init_with_retry',
+        ) as run:
+            slice_obj._Slice__init_blobstorage_kikimr()
+
+        run.assert_called_once()
+        self.assertEqual(run.call_args[0][1], [storage_a])
+        self.assertIn('blobstorage config init', run.call_args[0][2])
 
     def test_start_static_skips_hosts_with_storage_false(self):
         olap = 'ydb-olap-perf-001.search.yandex.net'

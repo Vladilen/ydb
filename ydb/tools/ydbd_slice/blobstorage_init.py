@@ -1,11 +1,16 @@
 import logging
 import sys
+import time
+from types import SimpleNamespace
 
 import tenacity as tc
 
 logger = logging.getLogger(__name__)
 
 BLOBSTORAGE_INIT_RETRY_DEADLINE_SECONDS = 300
+
+_RETRY_WAIT = tc.wait_exponential(max=60)
+_RETRY_STOP = tc.stop_after_delay(BLOBSTORAGE_INIT_RETRY_DEADLINE_SECONDS)
 
 
 class BlobstorageConfigInitFailed(Exception):
@@ -20,22 +25,23 @@ class BlobstorageConfigInitFailed(Exception):
         )
 
 
-def _execute_on_node(nodes, host, cmd):
+def _execute_on_nodes(nodes, hosts, cmd):
+    """Run one command on every host in a single wave.
+
+    DeployNodes turns that wave into one ``pssh run -p <host count>``.
+    """
     results = {}
-    running_jobs = nodes.execute_async_ret(cmd, check_retcode=False, nodes=[host], results=results)
+    running_jobs = nodes.execute_async_ret(cmd, check_retcode=False, nodes=list(hosts), results=results)
     nodes._check_async_execution(running_jobs, check_retcode=False, results=results)
-    return results.get(host, {'retcode': -1, 'stdout': '', 'stderr': ''})
+    return results
 
 
-def _log_before_retry(retry_state):
-    exc = retry_state.outcome.exception()
-    if not isinstance(exc, BlobstorageConfigInitFailed):
-        return
+def _log_failure(exc, attempt):
     logger.warning(
         "blobstorage config init failed on host=%s (attempt=%d, retcode=%s, command=%s)\n"
         "stdout is:\n%s\nstderr is:\n%s",
         exc.host,
-        retry_state.attempt_number,
+        attempt,
         exc.retcode,
         exc.cmd,
         exc.stdout,
@@ -43,29 +49,9 @@ def _log_before_retry(retry_state):
     )
 
 
-@tc.retry(
-    retry=tc.retry_if_exception_type(BlobstorageConfigInitFailed),
-    wait=tc.wait_exponential(max=60),
-    stop=tc.stop_after_delay(BLOBSTORAGE_INIT_RETRY_DEADLINE_SECONDS),
-    reraise=True,
-    before_sleep=_log_before_retry,
-)
-def _run_blobstorage_config_init(nodes, host, cmd):
-    logger.info("Running blobstorage config init on host=%s: %s", host, cmd)
-    result = _execute_on_node(nodes, host, cmd)
-    retcode = result.get('retcode')
-    stdout = result.get('stdout', '')
-    stderr = result.get('stderr', '')
-    if retcode == 0:
-        logger.info("blobstorage config init succeeded on host=%s", host)
-        return
-    raise BlobstorageConfigInitFailed(host, cmd, retcode, stdout, stderr)
-
-
-def run_blobstorage_config_init_with_retry(nodes, host, cmd):
-    try:
-        _run_blobstorage_config_init(nodes, host, cmd)
-    except BlobstorageConfigInitFailed as exc:
+def _abort(failures):
+    chunks = []
+    for exc in failures:
         status_line = str(exc)
         logger.critical(
             "{status_line}\n"
@@ -78,4 +64,57 @@ def run_blobstorage_config_init_with_retry(nodes, host, cmd):
                 stderr=exc.stderr,
             )
         )
-        sys.exit(status_line)
+        chunks.append("host={host}: {status}".format(host=exc.host, status=status_line))
+    sys.exit("\n".join(chunks))
+
+
+def _retry_state(attempt, started):
+    return SimpleNamespace(
+        attempt_number=attempt,
+        seconds_since_start=time.monotonic() - started,
+    )
+
+
+def run_blobstorage_config_init_with_retry(nodes, hosts, cmd):
+    """Init blobstorage on every host together, then retry only the failures."""
+    if isinstance(hosts, str):
+        hosts = [hosts]
+    else:
+        hosts = list(hosts)
+    if not hosts:
+        return
+
+    pending = list(hosts)
+    started = time.monotonic()
+    attempt = 0
+    while pending:
+        attempt += 1
+        logger.info(
+            "Running blobstorage config init on %d host(s) %s: %s",
+            len(pending),
+            ",".join(pending),
+            cmd,
+        )
+        results = _execute_on_nodes(nodes, pending, cmd)
+        failed = []
+        for host in pending:
+            result = results.get(host, {'retcode': -1, 'stdout': '', 'stderr': ''})
+            retcode = result.get('retcode')
+            stdout = result.get('stdout', '')
+            stderr = result.get('stderr', '')
+            if retcode == 0:
+                logger.info("blobstorage config init succeeded on host=%s", host)
+                continue
+            failed.append(BlobstorageConfigInitFailed(host, cmd, retcode, stdout, stderr))
+
+        if not failed:
+            return
+
+        state = _retry_state(attempt, started)
+        if _RETRY_STOP(state):
+            _abort(failed)
+
+        for exc in failed:
+            _log_failure(exc, attempt)
+        time.sleep(_RETRY_WAIT(state))
+        pending = [exc.host for exc in failed]
